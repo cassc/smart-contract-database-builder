@@ -14,6 +14,10 @@ struct Cli {
     /// Optionally ignore errors during processing (default: false)
     #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
     ignore_errors: bool,
+
+    /// Optionally duckdb path, if not provided will try to read from environment variable DUCKDB_PATH
+    #[arg(long)]
+    duckdb_path: Option<String>,
 }
 
 /// Load all plain contracts from the folder recursively
@@ -50,6 +54,9 @@ async fn main() {
 
     let plain_contracts_root = cli.plain_contracts_root;
     let ignore_errors = cli.ignore_errors;
+    let duckdb_path = cli
+        .duckdb_path
+        .unwrap_or_else(|| std::env::var("DUCKDB_PATH").expect("DUCKDB_PATH not set"));
 
     if let Some(plain_contracts_root) = plain_contracts_root {
         let contracts = process_plain_contracts(&plain_contracts_root, ignore_errors);

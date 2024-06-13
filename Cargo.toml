@@ -1,0 +1,12 @@
+[package]
+name = "smart-contract-database-builder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.7", features = ["derive"] }
+eyre = "0.6.12"
+serde = { version = "1.0.203", features = ["serde_derive", "derive"] }
+serde_json = "1.0.117"
+tokio = { version = "1.38.0", features = ["full"] }
+walkdir = "2.5.0"

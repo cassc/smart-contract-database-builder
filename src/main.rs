@@ -1,0 +1,58 @@
+use clap::{ArgAction, Parser};
+use plain_contract::PlainContract;
+use walkdir::WalkDir;
+
+pub mod plain_contract;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// Path to the root directory of plain contracts
+    #[arg(long)]
+    plain_contracts_root: Option<String>,
+
+    /// Optionally ignore errors during processing (default: false)
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+    ignore_errors: bool,
+}
+
+/// Load all plain contracts from the folder recursively
+pub fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
+    let mut contracts = Vec::with_capacity(12800);
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_dir())
+    {
+        let dir_path = entry.path();
+        let metadata_path = dir_path.join("metadata.json");
+
+        if metadata_path.exists() {
+            match PlainContract::from_folder(&dir_path.to_string_lossy()) {
+                Ok(c) => {
+                    contracts.push(c);
+                }
+                Err(error) => {
+                    if !ignore_errors {
+                        panic!("Process file failed with error {error}")
+                    }
+                }
+            }
+        }
+    }
+    contracts
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    let plain_contracts_root = cli.plain_contracts_root;
+    let ignore_errors = cli.ignore_errors;
+
+    if let Some(plain_contracts_root) = plain_contracts_root {
+        let contracts = process_plain_contracts(&plain_contracts_root, ignore_errors);
+        println!("Finished processing plain contracts: {}", contracts.len());
+    }
+}

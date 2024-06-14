@@ -1,0 +1,113 @@
+use duckdb::{types::FromSql, Connection};
+use eyre::Result;
+
+use crate::plain_contract::{ContractSource, Metadata, PlainContract};
+
+pub struct Storage {
+    conn: Connection,
+}
+
+enum SourceType {
+    SingleSolidity,
+    MultiSolidity,
+    Vyper,
+    Json,
+}
+
+impl FromSql for SourceType {
+    fn column_result(value: duckdb::types::ValueRef<'_>) -> duckdb::types::FromSqlResult<Self> {
+        let s = String::column_result(value)?;
+        match s.as_str() {
+            "single_sol" => Ok(SourceType::SingleSolidity),
+            "multi_sol" => Ok(SourceType::MultiSolidity),
+            "vyper" => Ok(SourceType::Vyper),
+            "json" => Ok(SourceType::Json),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Storage {
+    pub fn new(db_file: &str) -> Result<Storage> {
+        let conn = Connection::open(db_file)?;
+        let _ = conn.execute_batch(
+            r"
+-- Create ENUM type for source_type
+CREATE TYPE source_type_enum AS ENUM ('json', 'vyper', 'single_sol', 'multi_sol');
+
+-- Create contract table
+CREATE TABLE contract (
+    id STRING PRIMARY KEY,
+    name STRING,
+    metadata STRING,
+    source STRING,
+    source_type source_type_enum
+);
+
+-- Create function table with foreign key
+CREATE TABLE function (
+    id STRING PRIMARY KEY,
+    contract_id STRING,
+    filename STRING,
+    signature STRING,
+    selector STRING,
+    source_code STRING,
+    FOREIGN KEY (contract_id) REFERENCES contract(id)
+);
+
+CREATE INDEX idx_function_composite ON function(contract_id, selector, signature);
+",
+        );
+
+        Ok(Storage { conn })
+    }
+
+    /// Get contract by id
+    pub fn get_contract(&self, id: &str) -> Result<Option<PlainContract>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, source_type::varchar, metadata FROM contract WHERE id = ? limit 1",
+        )?;
+        let mut rows = stmt.query([id])?;
+        let row = match rows.next()? {
+            Some(row) => row,
+            None => return Ok(None),
+        };
+
+        let source: String = row.get(0)?;
+
+        let source_type: String = row.get(1)?; // this is an enum, fix this
+
+        let metadata: String = row.get(2)?;
+
+        let source: ContractSource = match source_type.as_str() {
+            "single_sol" => serde_json::from_str(&source)?,
+            "multi_sol" => serde_json::from_str(&source)?,
+            "vyper" => serde_json::from_str(&source)?,
+            "json" => serde_json::from_str(&source)?,
+            _ => unreachable!(),
+        };
+
+        let metadata: Metadata = serde_json::from_str(&metadata)?;
+        Ok(Some(PlainContract { metadata, source }))
+    }
+
+    pub fn store_contract(&self, contract: &PlainContract, id: Option<String>) -> Result<()> {
+        let PlainContract { metadata, source } = contract;
+        let id = id.unwrap_or_else(|| contract.hash());
+        let name = &metadata.contract_name.clone();
+        let source_type = match source {
+            ContractSource::SingleSolidity(_) => "single_sol",
+            ContractSource::MultiSolidity(_) => "multi_sol",
+            ContractSource::Vyper(_) => "vyper",
+            ContractSource::Json(_) => "json",
+        };
+        let source = serde_json::to_string(source)?;
+        let metadata = serde_json::to_string(metadata)?;
+        self.conn.execute(
+            "INSERT INTO contract (id, name, metadata, source, source_type) VALUES (?, ?, ?, ?, ?)",
+            [id, name.into(), metadata, source, source_type.into()],
+        )?;
+
+        Ok(())
+    }
+}

@@ -1,8 +1,10 @@
 use clap::{ArgAction, Parser};
+use eyre::Result;
 use plain_contract::PlainContract;
 use walkdir::WalkDir;
 
-pub mod plain_contract;
+mod db;
+mod plain_contract;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -21,7 +23,7 @@ struct Cli {
 }
 
 /// Load all plain contracts from the folder recursively
-pub fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
+pub async fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
     let mut contracts = Vec::with_capacity(12800);
     for entry in WalkDir::new(root)
         .follow_links(true)
@@ -33,7 +35,7 @@ pub fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainCont
         let metadata_path = dir_path.join("metadata.json");
 
         if metadata_path.exists() {
-            match PlainContract::from_folder(&dir_path.to_string_lossy()) {
+            match PlainContract::from_folder(&dir_path.to_string_lossy()).await {
                 Ok(c) => {
                     contracts.push(c);
                 }
@@ -49,7 +51,9 @@ pub fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainCont
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
+    env_logger::init();
+
     let cli = Cli::parse();
 
     let plain_contracts_root = cli.plain_contracts_root;
@@ -58,8 +62,25 @@ async fn main() {
         .duckdb_path
         .unwrap_or_else(|| std::env::var("DUCKDB_PATH").expect("DUCKDB_PATH not set"));
 
+    let storage = db::Storage::new(&duckdb_path)?;
+
     if let Some(plain_contracts_root) = plain_contracts_root {
-        let contracts = process_plain_contracts(&plain_contracts_root, ignore_errors);
+        let contracts = process_plain_contracts(&plain_contracts_root, ignore_errors).await;
+        contracts.iter().for_each(|c| {
+            let id = c.hash();
+            match storage.get_contract(&id) {
+                Ok(None) => {
+                    storage.store_contract(c, Some(id)).unwrap();
+                }
+                Err(err) => {
+                    if !ignore_errors {
+                        panic!("Check contract existence got error: {}", err)
+                    }
+                }
+                _ => {}
+            }
+        });
         println!("Finished processing plain contracts: {}", contracts.len());
     }
+    Ok(())
 }

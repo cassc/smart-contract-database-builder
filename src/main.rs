@@ -1,25 +1,43 @@
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, Subcommand};
 use eyre::Result;
 use plain_contract::PlainContract;
 use walkdir::WalkDir;
 
 mod db;
+mod functions;
 mod plain_contract;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Path to the root directory of plain contracts
-    #[arg(long)]
-    plain_contracts_root: Option<String>,
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    /// Optionally ignore errors during processing (default: false)
-    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
-    ignore_errors: bool,
+#[derive(Subcommand)]
+enum Commands {
+    /// Preprocess the contracts with the given options
+    PreProcess {
+        /// Path to the root directory of plain contracts. The folder is expected to
+        /// contain contracts stored alongside `metadata.json`.
+        ///
+        /// Example https://huggingface.co/datasets/Zellic/smart-contract-fiesta/tree/main/organized_contracts
+        #[arg(long)]
+        plain_contracts_root: Option<String>,
 
-    /// Optionally duckdb path, if not provided will try to read from environment variable DUCKDB_PATH
-    #[arg(long)]
-    duckdb_path: Option<String>,
+        /// Optionally ignore errors during processing (default: false)
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        ignore_errors: bool,
+
+        /// Optionally duckdb path, if not provided will try to read from environment variable DUCKDB_PATH
+        #[arg(long)]
+        duckdb_path: Option<String>,
+    },
+    IndexFunctions {
+        /// Optionally duckdb path, if not provided will try to read from environment variable DUCKDB_PATH
+        #[arg(long)]
+        duckdb_path: Option<String>,
+    },
 }
 
 /// Load all plain contracts from the folder recursively
@@ -56,31 +74,38 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let plain_contracts_root = cli.plain_contracts_root;
-    let ignore_errors = cli.ignore_errors;
-    let duckdb_path = cli
-        .duckdb_path
-        .unwrap_or_else(|| std::env::var("DUCKDB_PATH").expect("DUCKDB_PATH not set"));
+    match &cli.command {
+        Commands::PreProcess {
+            plain_contracts_root,
+            ignore_errors,
+            duckdb_path,
+        } => {
+            let duckdb_path = match duckdb_path {
+                Some(path) => path.clone(),
+                None => std::env::var("DUCKDB_PATH")
+                    .unwrap_or_else(|_| panic!("DUCKDB_PATH environment variable is not set")),
+            };
+            let storage = db::Storage::new(&duckdb_path)?;
 
-    let storage = db::Storage::new(&duckdb_path)?;
-
-    if let Some(plain_contracts_root) = plain_contracts_root {
-        let contracts = process_plain_contracts(&plain_contracts_root, ignore_errors).await;
-        contracts.iter().for_each(|c| {
-            let id = c.hash();
-            match storage.get_contract(&id) {
-                Ok(None) => {
-                    storage.store_contract(c, Some(id)).unwrap();
-                }
-                Err(err) => {
-                    if !ignore_errors {
-                        panic!("Check contract existence got error: {}", err)
+            if let Some(plain_contracts_root) = plain_contracts_root {
+                let contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
+                contracts.iter().for_each(|c| {
+                    let id = c.hash();
+                    match storage.get_contract(&id) {
+                        Ok(None) => {
+                            storage.store_contract(c, Some(id)).unwrap();
+                        }
+                        Err(err) => {
+                            if !ignore_errors {
+                                panic!("Check contract existence got error: {}", err)
+                            }
+                        }
+                        _ => {}
                     }
-                }
-                _ => {}
+                });
+                println!("Finished processing plain contracts: {}", contracts.len());
             }
-        });
-        println!("Finished processing plain contracts: {}", contracts.len());
+            Ok(())
+        }
     }
-    Ok(())
 }

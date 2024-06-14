@@ -1,4 +1,4 @@
-use duckdb::{types::FromSql, Connection};
+use duckdb::{params, types::FromSql, Connection};
 use eyre::Result;
 
 use crate::plain_contract::{ContractSource, Metadata, PlainContract};
@@ -91,6 +91,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         Ok(Some(PlainContract { metadata, source }))
     }
 
+    /// Store a single contract
     pub fn store_contract(&self, contract: &PlainContract, id: Option<String>) -> Result<()> {
         let PlainContract { metadata, source } = contract;
         let id = id.unwrap_or_else(|| contract.hash());
@@ -107,6 +108,31 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             "INSERT INTO contract (id, name, metadata, source, source_type) VALUES (?, ?, ?, ?, ?)",
             [id, name.into(), metadata, source, source_type.into()],
         )?;
+
+        Ok(())
+    }
+
+    /// Store multiple contracts in batch mode
+    pub fn store_contracts(&self, contracts: Vec<PlainContract>) -> Result<()> {
+        let mut app = self.conn.appender("contract")?;
+        let mut rows = Vec::new();
+
+        for c in contracts {
+            let PlainContract { metadata, source } = &c;
+            let id: String = c.hash();
+            let name: String = metadata.contract_name.clone();
+            let source_type = match &source {
+                ContractSource::SingleSolidity(_) => "single_sol",
+                ContractSource::MultiSolidity(_) => "multi_sol",
+                ContractSource::Vyper(_) => "vyper",
+                ContractSource::Json(_) => "json",
+            };
+            let source = serde_json::to_string(&source)?;
+            let metadata = serde_json::to_string(&metadata)?;
+            rows.push([id, name, metadata, source, source_type.to_owned()]);
+        }
+
+        app.append_rows(rows)?;
 
         Ok(())
     }

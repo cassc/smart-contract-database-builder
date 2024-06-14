@@ -43,6 +43,11 @@ pub struct PlainContract {
     pub source: ContractSource,
 }
 
+pub struct CompilationOutput {
+    pub bytecode: String,
+    pub abi: String,
+}
+
 async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource> {
     // list all solidity files in the folder
     let folder = fs::read_dir(path).await?;
@@ -65,6 +70,7 @@ async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource>
     }
     Ok(ContractSource::MultiSolidity(sources))
 }
+
 
 /// Hashing the content after removing all the whitespaces
 fn simple_hash(content: &str) -> String {
@@ -92,6 +98,8 @@ impl ContractSource {
         }
     }
 }
+
+
 
 impl PlainContract {
     pub fn hash(&self) -> String {
@@ -135,5 +143,9 @@ impl PlainContract {
                 source: source_from_multi_source_contract(path).await?,
             }),
         }
+    }
+
+    pub async compile(&self) -> Result<CompilationOutput> {
+        todo!()
     }
 }

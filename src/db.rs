@@ -1,7 +1,7 @@
+use crate::plain_contract::{ContractSource, ContractSourceType, Metadata, PlainContract};
 use duckdb::{params, types::FromSql, Connection};
 use eyre::Result;
-
-use crate::plain_contract::{ContractSource, Metadata, PlainContract};
+use rand::Rng;
 
 pub struct Storage {
     conn: Connection,
@@ -25,6 +25,22 @@ impl FromSql for SourceType {
             _ => unreachable!(),
         }
     }
+}
+
+fn row_to_contract(row: &duckdb::Row) -> Result<PlainContract> {
+    let source: String = row.get(0)?;
+    let source_type: SourceType = row.get(1)?;
+    let metadata: String = row.get(2)?;
+
+    let source: ContractSource = match source_type {
+        SourceType::SingleSolidity => serde_json::from_str(&source)?,
+        SourceType::MultiSolidity => serde_json::from_str(&source)?,
+        SourceType::Vyper => serde_json::from_str(&source)?,
+        SourceType::Json => serde_json::from_str(&source)?,
+    };
+
+    let metadata: Metadata = serde_json::from_str(&metadata)?;
+    Ok(PlainContract { metadata, source })
 }
 
 impl Storage {
@@ -73,22 +89,31 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             None => return Ok(None),
         };
 
-        let source: String = row.get(0)?;
+        Ok(Some(row_to_contract(row)?))
+    }
 
-        let source_type: String = row.get(1)?; // this is an enum, fix this
-
-        let metadata: String = row.get(2)?;
-
-        let source: ContractSource = match source_type.as_str() {
-            "single_sol" => serde_json::from_str(&source)?,
-            "multi_sol" => serde_json::from_str(&source)?,
-            "vyper" => serde_json::from_str(&source)?,
-            "json" => serde_json::from_str(&source)?,
-            _ => unreachable!(),
+    pub fn get_random_contract(
+        &self,
+        source_type: &ContractSourceType,
+        offset: Option<u32>,
+    ) -> Result<Option<PlainContract>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, source_type::varchar, metadata FROM contract where source_type::varchar=? OFFSET ? LIMIT 1",
+        )?;
+        let source_type: String = source_type.to_string();
+        let mut rows = stmt.query(params![
+            &source_type,
+            offset.unwrap_or_else(|| {
+                let mut rng = rand::thread_rng();
+                rng.gen_range(0..1000)
+            })
+        ])?;
+        let row = match rows.next()? {
+            Some(row) => row,
+            None => return Err(eyre::eyre!("No contract found")),
         };
 
-        let metadata: Metadata = serde_json::from_str(&metadata)?;
-        Ok(Some(PlainContract { metadata, source }))
+        Ok(Some(row_to_contract(row)?))
     }
 
     /// Store a single contract

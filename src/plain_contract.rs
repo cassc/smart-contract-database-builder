@@ -1,8 +1,20 @@
-use eyre::Result;
+use duckdb::ToSql;
+use eyre::{ContextCompat, Result};
+use foundry_compilers::{
+    artifacts::Settings,
+    multi::{MultiCompiler, MultiCompilerSettings},
+    solc::{Solc, SolcCompiler},
+    Project, ProjectCompileOutput, ProjectPathsConfig,
+};
 use itertools::Itertools;
 use regex::Regex;
+use semver::Version;
 use serde::{Deserialize, Serialize};
-use tokio::fs;
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
+use tokio::fs::{self, create_dir_all};
 use tokio_stream::{wrappers::ReadDirStream, StreamExt};
 
 /// Metadata of a contract
@@ -18,6 +30,20 @@ pub struct Metadata {
     pub optimization_used: bool,
     #[serde(rename = "BytecodeHash")]
     pub bytecode_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceCodeEntry {
+    pub content: String,
+}
+
+/// Etherscan json file
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EtherscanJson {
+    pub langauge: Option<String>,
+    pub name: Option<String>,
+    pub sources: HashMap<String, SourceCodeEntry>,
+    pub settings: Option<Settings>,
 }
 
 /// A single source file
@@ -36,16 +62,48 @@ pub enum ContractSource {
     Json(SourceFile),
 }
 
+/// The type of the contract source
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ContractSourceType {
+    #[serde(rename = "single_sol")]
+    SingleSolidity,
+    #[serde(rename = "multi_sol")]
+    MultiSolidity,
+    #[serde(rename = "vyper")]
+    Vyper,
+    #[serde(rename = "json")]
+    Json,
+}
+
+impl ToString for ContractSourceType {
+    fn to_string(&self) -> String {
+        match self {
+            ContractSourceType::SingleSolidity => "single_sol".into(),
+            ContractSourceType::MultiSolidity => "multi_sol".into(),
+            ContractSourceType::Vyper => "vyper".into(),
+            ContractSourceType::Json => "json".into(),
+        }
+    }
+}
+
+impl ToSql for ContractSourceType {
+    fn to_sql(&self) -> duckdb::Result<duckdb::types::ToSqlOutput<'_>> {
+        Ok(duckdb::types::ToSqlOutput::Owned(
+            duckdb::types::Value::Enum(match self {
+                ContractSourceType::SingleSolidity => "single_sol".into(),
+                ContractSourceType::MultiSolidity => "multi_sol".into(),
+                ContractSourceType::Vyper => "vyper".into(),
+                ContractSourceType::Json => "json".into(),
+            }),
+        ))
+    }
+}
+
 /// A contract with metadata and source code
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlainContract {
     pub metadata: Metadata,
     pub source: ContractSource,
-}
-
-pub struct CompilationOutput {
-    pub bytecode: String,
-    pub abi: String,
 }
 
 async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource> {
@@ -70,7 +128,6 @@ async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource>
     }
     Ok(ContractSource::MultiSolidity(sources))
 }
-
 
 /// Hashing the content after removing all the whitespaces
 fn simple_hash(content: &str) -> String {
@@ -97,9 +154,57 @@ impl ContractSource {
             ContractSource::Json(source) => simple_hash(&source.content),
         }
     }
+
+    /// Copy and expand the source code files to file system
+    /// NOTE: copied from foundry
+    pub async fn write_to(&self, dir: &Path) -> Result<()> {
+        create_dir_all(dir).await?;
+        let entries = match self {
+            ContractSource::SingleSolidity(source) => vec![source],
+            ContractSource::MultiSolidity(sources) => sources.iter().collect(),
+            ContractSource::Vyper(source) => vec![source],
+            ContractSource::Json(source) => vec![source],
+        };
+        Self::write_entries(dir, &entries).await
+    }
+
+    async fn write_entries(dir: &Path, entries: &Vec<&SourceFile>) -> Result<()> {
+        create_dir_all(dir).await?;
+        for entry in entries {
+            let mut sanitized_path = sanitize_path(&entry.name);
+            if sanitized_path.extension().is_none() {
+                let with_extension = sanitized_path.with_extension("sol");
+                if !entries
+                    .iter()
+                    .any(|e| PathBuf::from(e.name.clone()) == with_extension)
+                {
+                    sanitized_path = with_extension;
+                }
+            }
+            let joined = dir.join(sanitized_path);
+            if let Some(parent) = joined.parent() {
+                create_dir_all(parent).await?;
+                fs::write(joined, &entry.content).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
+/// Remove any components in a smart contract source path that could cause a directory traversal.
+pub(crate) fn sanitize_path(path: impl AsRef<Path>) -> PathBuf {
+    let sanitized = path
+        .as_ref()
+        .components()
+        .filter(|x| x.as_os_str() != Component::ParentDir.as_os_str())
+        .collect::<PathBuf>();
 
+    // Force absolute paths to be relative
+    sanitized
+        .strip_prefix("/")
+        .map(PathBuf::from)
+        .unwrap_or(sanitized)
+}
 
 impl PlainContract {
     pub fn hash(&self) -> String {
@@ -145,7 +250,54 @@ impl PlainContract {
         }
     }
 
-    pub async compile(&self) -> Result<CompilationOutput> {
-        todo!()
+    /// Compile the contract
+    pub async fn compile(&self) -> Result<ProjectCompileOutput> {
+        let root = tempfile::tempdir()?;
+        let root_path = root.path();
+        let source_path = root_path.join(&self.metadata.contract_name);
+        self.source.write_to(&source_path).await?;
+
+        let v = self.metadata.compiler_version.clone();
+        let v = v.trim_start_matches('v');
+        let version = Version::parse(v)?;
+        let version = Version::new(version.major, version.minor, version.patch);
+        let solc = Solc::install(&version).await?;
+        let solc = SolcCompiler::Specific(solc);
+        let compiler = MultiCompiler::new(solc, None)?;
+
+        let mut settings = Settings::default();
+        if let ContractSource::Json(ref source) = self.source {
+            println!(
+                "Compiling with settings from contract.json {}",
+                &source.content
+            );
+            let json: EtherscanJson = serde_json::from_str(&source.content)?;
+            settings = json.settings.context("Missing settings in json")?;
+
+            for remapping in settings.remappings.iter_mut() {
+                let new_path = source_path.join(remapping.path.trim_start_matches('/'));
+                remapping.path = new_path.display().to_string();
+            }
+
+            let sources: Vec<SourceFile> = json
+                .sources
+                .iter()
+                .map(|(name, content)| SourceFile {
+                    name: name.clone(),
+                    content: content.content.clone(),
+                })
+                .collect();
+            let sources = sources.iter().collect();
+            ContractSource::write_entries(&source_path, &sources).await?;
+        }
+
+        let paths = ProjectPathsConfig::builder()
+            .sources(source_path)
+            .remappings(settings.remappings)
+            .build_with_root(root_path);
+
+        let builder = Project::builder().paths(paths).ephemeral().no_artifacts();
+
+        Ok(builder.build(compiler)?.compile()?)
     }
 }

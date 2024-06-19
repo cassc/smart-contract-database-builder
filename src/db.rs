@@ -1,3 +1,5 @@
+use std::fs::create_dir_all;
+
 use crate::plain_contract::{ContractSource, ContractSourceType, Metadata, PlainContract};
 use duckdb::{params, types::FromSql, Connection};
 use eyre::Result;
@@ -40,11 +42,16 @@ fn row_to_contract(row: &duckdb::Row) -> Result<PlainContract> {
     };
 
     let metadata: Metadata = serde_json::from_str(&metadata)?;
-    Ok(PlainContract { metadata, source })
+    Ok(PlainContract::new(metadata, source))
 }
 
 impl Storage {
     pub fn new(db_file: &str) -> Result<Storage> {
+        let parent = std::path::Path::new(db_file).parent();
+        if let Some(parent) = parent {
+            create_dir_all(parent)?;
+        }
+
         let conn = Connection::open(db_file)?;
         let _ = conn.execute_batch(
             r"
@@ -118,7 +125,9 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
 
     /// Store a single contract
     pub fn store_contract(&self, contract: &PlainContract, id: Option<String>) -> Result<()> {
-        let PlainContract { metadata, source } = contract;
+        let PlainContract {
+            metadata, source, ..
+        } = contract;
         let id = id.unwrap_or_else(|| contract.hash());
         let name = &metadata.contract_name.clone();
         let source_type = match source {
@@ -143,7 +152,9 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         let mut rows = Vec::new();
 
         for c in contracts {
-            let PlainContract { metadata, source } = &c;
+            let PlainContract {
+                metadata, source, ..
+            } = &c;
             let id: String = c.hash();
             let name: String = metadata.contract_name.clone();
             let source_type = match &source {

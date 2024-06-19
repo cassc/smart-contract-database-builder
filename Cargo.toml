@@ -17,8 +17,14 @@ walkdir = "2.5.0"
 env_logger = "0.11.3"
 log = "0.4.21"
 tokio-stream = { version = "0.1.15", features = ["full"] }
-# ethers = { version = "2.0.14", features = ["ws"] }
 tempfile = "3.10.1"
 rand = "0.8.5"
 foundry-compilers = { version = "0.8.0", features = ["full", "svm-solc"] }
 semver = "1.0.23"
+alloy-json-abi = { version = "*", features = ["serde_json"] }
+foundry-compilers-artifacts = { version = "*", features = ["async"] }
+
+
+# ethers = { version = "2.0.14", features = ["ws"] }
+# foundry-compilers-artifacts-solc = { version = "*", features = ["async"] }
+# foundry-compilers-artifacts-vyper = "*"

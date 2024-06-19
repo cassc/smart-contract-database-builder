@@ -6,6 +6,7 @@ use walkdir::WalkDir;
 mod db;
 mod functions;
 mod plain_contract;
+mod utils;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -31,6 +32,10 @@ enum Commands {
         /// Optionally ignore errors during processing (default: false)
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         ignore_errors: bool,
+
+        /// Optinal chunk size, for faster importing contracts. Use this only if you have an empty database to start with
+        #[arg(long)]
+        chunk_size: Option<usize>,
     },
     IndexFunctions {},
 }
@@ -81,23 +86,37 @@ async fn main() -> Result<()> {
         Commands::PreProcess {
             plain_contracts_root,
             ignore_errors,
+            chunk_size,
         } => {
             if let Some(plain_contracts_root) = plain_contracts_root {
-                let contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
-                contracts.iter().for_each(|c| {
-                    let id = c.hash();
-                    match storage.get_contract(&id) {
-                        Ok(None) => {
-                            storage.store_contract(c, Some(id)).unwrap();
-                        }
-                        Err(err) => {
-                            if !ignore_errors {
-                                panic!("Check contract existence got error: {}", err)
+                let mut contracts =
+                    process_plain_contracts(plain_contracts_root, *ignore_errors).await;
+                let chunk_size = chunk_size.unwrap_or(0);
+                if chunk_size <= 1 {
+                    contracts.iter().for_each(|c| {
+                        let id = c.hash();
+                        match storage.get_contract(&id) {
+                            Ok(None) => {
+                                storage.store_contract(c, Some(id)).unwrap();
                             }
+                            Err(err) => {
+                                if !ignore_errors {
+                                    panic!("Check contract existence got error: {}", err)
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    }
-                });
+                    });
+                } else {
+                    // TODO no data written to db?
+                    contracts.chunks_mut(chunk_size).for_each(|chunk| {
+                        let contracts = chunk.to_vec();
+                        storage
+                            .store_contracts(contracts)
+                            .expect("Failed to store contracts");
+                    });
+                }
+
                 println!("Finished processing plain contracts: {}", contracts.len());
             }
             Ok(())
@@ -107,16 +126,17 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::plain_contract::ContractSourceType;
 
-    use super::*;
+    const TEST_DUCKDB_PATH: &str = "/home/garfield/tmp/contracts.duckdb";
 
-    const TEST_DUCKDB_PATH: &str = "/tmp/contracts.duckdb";
+    fn setup() {}
 
     #[tokio::test]
     async fn compile_standard_json() -> Result<()> {
         let storage = db::Storage::new(TEST_DUCKDB_PATH)?;
-        let contract = storage
+        let mut contract = storage
             .get_random_contract(&ContractSourceType::Json, None)?
             .expect("No contract found");
         let output = contract.compile().await?.succeeded();
@@ -127,19 +147,32 @@ mod tests {
     }
     #[tokio::test]
     async fn compile_single_source_file() -> Result<()> {
-        let storage = db::Storage::new("/tmp/contracts.duckdb")?;
-        let contract = storage
+        setup();
+        let storage = db::Storage::new(TEST_DUCKDB_PATH)?;
+        let mut contract = storage
             .get_random_contract(&ContractSourceType::SingleSolidity, None)?
             .expect("No contract found");
-        let output = contract.compile().await?.succeeded();
+        println!(
+            "Compile contract: {} {:?}",
+            contract.id(),
+            contract.metadata
+        );
+        let output = contract.compile().await?;
+
         output.assert_success();
         assert!(output.artifacts().count() > 0);
+
+        let functions = contract.extract_functions()?;
+        assert!(!functions.is_empty());
+
+        // println!("Functions: {:?}", functions);
+
         Ok(())
     }
     #[tokio::test]
     async fn compile_multi_source_files() -> Result<()> {
-        let storage = db::Storage::new("/tmp/contracts.duckdb")?;
-        let contract = storage
+        let storage = db::Storage::new(TEST_DUCKDB_PATH)?;
+        let mut contract = storage
             .get_random_contract(&ContractSourceType::MultiSolidity, None)?
             .expect("No contract found");
         let output = contract.compile().await?.succeeded();
@@ -149,8 +182,8 @@ mod tests {
     }
 
     async fn compile_yul_source_code() -> Result<()> {
-        let storage = db::Storage::new("/tmp/contracts.duckdb")?;
-        let contract = storage
+        let storage = db::Storage::new(TEST_DUCKDB_PATH)?;
+        let mut contract = storage
             .get_random_contract(&ContractSourceType::MultiSolidity, None)?
             .expect("No contract found");
         let output = contract.compile().await?.succeeded();

@@ -1,13 +1,13 @@
 use duckdb::ToSql;
 use eyre::{ContextCompat, Result};
 use foundry_compilers::{
-    artifacts::Settings,
+    artifacts::{LowFidelitySourceLocation, Node, NodeType::*, Settings},
     multi::{MultiCompiler, MultiCompilerSettings},
     solc::{Solc, SolcCompiler},
-    Project, ProjectCompileOutput, ProjectPathsConfig,
+    Artifact, Project, ProjectCompileOutput, ProjectPathsConfig,
 };
+
 use itertools::Itertools;
-use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,8 +17,10 @@ use std::{
 use tokio::fs::{self, create_dir_all};
 use tokio_stream::{wrappers::ReadDirStream, StreamExt};
 
+use crate::{functions::ContractFunction, utils::simple_hash};
+
 /// Metadata of a contract
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Metadata {
     #[serde(rename = "ContractName")]
     pub contract_name: String,
@@ -47,14 +49,14 @@ pub struct EtherscanJson {
 }
 
 /// A single source file
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SourceFile {
     pub name: String,
     pub content: String,
 }
 
 /// The complete source code of a contract
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum ContractSource {
     SingleSolidity(SourceFile),
     MultiSolidity(Vec<SourceFile>),
@@ -100,10 +102,14 @@ impl ToSql for ContractSourceType {
 }
 
 /// A contract with metadata and source code
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PlainContract {
     pub metadata: Metadata,
     pub source: ContractSource,
+    #[serde(skip)]
+    pub compilation_output: Option<ProjectCompileOutput>,
+    #[serde(skip)]
+    pub source_files: Option<Vec<SourceFile>>,
 }
 
 async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource> {
@@ -127,14 +133,6 @@ async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource>
         }
     }
     Ok(ContractSource::MultiSolidity(sources))
-}
-
-/// Hashing the content after removing all the whitespaces
-fn simple_hash(content: &str) -> String {
-    let re = Regex::new(r"\s+").unwrap();
-    let result = re.replace_all(content, "");
-    let digest = md5::compute(result.as_bytes());
-    format!("{:x}", digest)
 }
 
 impl ContractSource {
@@ -166,6 +164,27 @@ impl ContractSource {
             ContractSource::Json(source) => vec![source],
         };
         Self::write_entries(dir, &entries).await
+    }
+
+    fn get_source_files(&self) -> Result<Vec<SourceFile>> {
+        match self {
+            ContractSource::SingleSolidity(source) => Ok(vec![source.clone()]),
+            ContractSource::MultiSolidity(sources) => Ok(sources.clone()),
+            ContractSource::Vyper(source) => Ok(vec![source.clone()]),
+            ContractSource::Json(source) => {
+                let json: EtherscanJson = serde_json::from_str(&source.content)?;
+
+                let sources: Vec<SourceFile> = json
+                    .sources
+                    .iter()
+                    .map(|(name, content)| SourceFile {
+                        name: name.clone(),
+                        content: content.content.clone(),
+                    })
+                    .collect();
+                Ok(sources)
+            }
+        }
     }
 
     async fn write_entries(dir: &Path, entries: &Vec<&SourceFile>) -> Result<()> {
@@ -211,6 +230,10 @@ impl PlainContract {
         self.source.hash()
     }
 
+    pub fn id(&self) -> String {
+        self.hash()
+    }
+
     /// Parse a contract from a folder path
     pub async fn from_folder(path: &str) -> Result<Self> {
         let metadata = fs::read_to_string(format!("{}/metadata.json", path)).await?;
@@ -229,33 +252,38 @@ impl PlainContract {
                 let name = "contract.json".into();
                 let content = contract_json;
                 let source = ContractSource::Json(SourceFile { name, content });
-                Ok(Self { metadata, source })
+                Ok(Self::new(metadata, source))
             }
             (_, Ok(solidity_source), _) => {
                 let name = "main.sol".into();
                 let content = solidity_source;
                 let source = ContractSource::SingleSolidity(SourceFile { name, content });
-                Ok(Self { metadata, source })
+                Ok(Self::new(metadata, source))
             }
             (_, _, Ok(viper_source)) => {
                 let name = "main.vy".into();
                 let content = viper_source;
                 let source = ContractSource::Vyper(SourceFile { name, content });
-                Ok(Self { metadata, source })
+                Ok(Self::new(metadata, source))
             }
-            _ => Ok(Self {
+            _ => Ok(Self::new(
                 metadata,
-                source: source_from_multi_source_contract(path).await?,
-            }),
+                source_from_multi_source_contract(path).await?,
+            )),
         }
     }
 
+    pub fn get_source_files(&self) -> Result<Vec<SourceFile>> {
+        self.source.get_source_files()
+    }
+
     /// Compile the contract
-    pub async fn compile(&self) -> Result<ProjectCompileOutput> {
+    pub async fn compile(&mut self) -> Result<ProjectCompileOutput> {
         let root = tempfile::tempdir()?;
         let root_path = root.path();
         let source_path = root_path.join(&self.metadata.contract_name);
-        self.source.write_to(&source_path).await?;
+
+        let source_files = self.get_source_files()?;
 
         let v = self.metadata.compiler_version.clone();
         let v = v.trim_start_matches('v');
@@ -266,11 +294,9 @@ impl PlainContract {
         let compiler = MultiCompiler::new(solc, None)?;
 
         let mut settings = Settings::default();
+
+        // TODO json is parsed twice, also parsed in writting source files for ether json
         if let ContractSource::Json(ref source) = self.source {
-            println!(
-                "Compiling with settings from contract.json {}",
-                &source.content
-            );
             let json: EtherscanJson = serde_json::from_str(&source.content)?;
             settings = json.settings.context("Missing settings in json")?;
 
@@ -278,26 +304,165 @@ impl PlainContract {
                 let new_path = source_path.join(remapping.path.trim_start_matches('/'));
                 remapping.path = new_path.display().to_string();
             }
-
-            let sources: Vec<SourceFile> = json
-                .sources
-                .iter()
-                .map(|(name, content)| SourceFile {
-                    name: name.clone(),
-                    content: content.content.clone(),
-                })
-                .collect();
-            let sources = sources.iter().collect();
-            ContractSource::write_entries(&source_path, &sources).await?;
         }
 
+        ContractSource::write_entries(&source_path, &source_files.iter().collect()).await?;
+
         let paths = ProjectPathsConfig::builder()
-            .sources(source_path)
+            .sources(source_path.clone())
             .remappings(settings.remappings)
             .build_with_root(root_path);
 
-        let builder = Project::builder().paths(paths).ephemeral().no_artifacts();
+        let mut settings = MultiCompilerSettings::default();
+        let solc_settings = settings
+            .solc
+            .clone()
+            .with_ast()
+            .with_via_ir_minimum_optimization();
+        settings.solc = solc_settings;
+        let builder = Project::builder()
+            .paths(paths)
+            .ephemeral()
+            .no_artifacts()
+            .settings(settings);
+        let builder = builder.build(compiler)?;
+        let output = builder.compile()?.with_stripped_file_prefixes(&source_path);
 
-        Ok(builder.build(compiler)?.compile()?)
+        self.source_files = Some(source_files);
+        self.compilation_output = Some(output.clone());
+
+        Ok(output)
+    }
+
+    pub fn new(metadata: Metadata, source: ContractSource) -> PlainContract {
+        PlainContract {
+            metadata,
+            source,
+            compilation_output: None,
+            source_files: None,
+        }
+    }
+
+    pub fn source_code_by_function_name(
+        &self,
+        contract_name: &str,
+        function_name: &str,
+    ) -> Result<String> {
+        let compilation_output = self
+            .compilation_output
+            .as_ref()
+            .context("No compilation output")?;
+        let contract = compilation_output
+            .artifacts()
+            .find(|(name, _)| name == contract_name)
+            .context("Contract not found")?;
+
+        let (filename, _, artifact) = compilation_output
+            .artifacts_with_files()
+            .find(|(_, name, _)| *name == contract_name)
+            .context("Artifact not found")?;
+
+        let source_file = contract.1.source_file();
+        let mut nodes: Vec<&Node> = source_file
+            .as_ref()
+            .and_then(|f| f.ast.as_ref())
+            .map(|ast| ast.nodes.iter())
+            .unwrap_or_default()
+            .collect();
+
+        // NOTE: can we get the source code from the compilation output
+        let content = &self
+            .source_files
+            .as_ref()
+            .context("No source files in PlainContract")?
+            .iter()
+            .find(|f| {
+                println!("Filename: {}, wanted: {}", f.name, filename.display());
+                f.name == filename.display().to_string()
+            })
+            .context("No source file matches the expected file name")?
+            .content;
+
+        // todo this does not search the parent folders
+        while nodes.len() > 1 {
+            let node = nodes.pop().context("No node")?;
+            match node.node_type {
+                ContractDefinition
+                | FunctionDefinition
+                | StructDefinition
+                | EnumDefinition
+                | UserDefinedValueTypeDefinition => {
+                    println!(
+                        "name: {:?}, expected: {}",
+                        node.attribute::<String>("name"),
+                        function_name
+                    );
+                    match node.attribute::<String>("name") {
+                        Some(name) if name == function_name => {
+                            let src = &node.src;
+                            let start = src.start;
+                            let fid = src.index.expect("No file index in source location");
+                            let length = src.length.expect("No length in source location");
+                            let source_code = &content.as_bytes()[start..start + length];
+                            let source_code = String::from_utf8_lossy(source_code);
+                            return Ok(source_code.into());
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {
+                    let children = &node.nodes;
+                    nodes.extend(children);
+                }
+            }
+        }
+        Err(eyre::eyre!("Function not found"))
+    }
+
+    pub fn extract_functions(&self) -> Result<Vec<ContractFunction>> {
+        let compilation_output = self
+            .compilation_output
+            .as_ref()
+            .context("No compilation output")?;
+        let contract_id = self.id();
+        let functions = compilation_output
+            .artifacts()
+            .map(|(contract_name, contract)| {
+                let filename = contract
+                    .source_file()
+                    .and_then(|f| f.ast)
+                    .map(|ast| ast.absolute_path)
+                    .unwrap_or("".into());
+
+                if let Some(ref abi) = contract.abi {
+                    // let source_code = contract
+                    //     .source_file()
+                    //     .and_then(|f| f.ast)
+                    //     .map(|ast| format!("{:?}", ast.src))
+                    //     .unwrap_or("".into());
+                    // println!("Source code: {}", source_code);
+
+                    abi.functions()
+                        .map(|f| {
+                            let function_name = &f.name;
+                            let source_code = self
+                                .source_code_by_function_name(&contract_name, function_name)
+                                .unwrap();
+
+                            ContractFunction::from_abi(
+                                contract_id.clone(),
+                                filename.clone(),
+                                contract_name.clone(),
+                                f,
+                                source_code,
+                            )
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                }
+            });
+
+        Ok(functions.flatten().collect())
     }
 }

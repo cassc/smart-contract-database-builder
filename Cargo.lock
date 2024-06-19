@@ -3242,11 +3242,13 @@ checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 name = "smart-contract-database-builder"
 version = "0.1.0"
 dependencies = [
+ "alloy-json-abi",
  "clap",
  "duckdb",
  "env_logger",
  "eyre",
  "foundry-compilers",
+ "foundry-compilers-artifacts",
  "itertools 0.13.0",
  "log",
  "md5",

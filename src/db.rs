@@ -1,12 +1,15 @@
 use std::fs::create_dir_all;
 
-use crate::plain_contract::{ContractSource, ContractSourceType, Metadata, PlainContract};
+use crate::{
+    functions::ContractFunction,
+    plain_contract::{ContractSource, ContractSourceType, Metadata, PlainContract},
+};
 use duckdb::{params, types::FromSql, Connection};
 use eyre::Result;
 use rand::Rng;
 
 pub struct Storage {
-    conn: Connection,
+    pub conn: Connection,
 }
 
 enum SourceType {
@@ -29,7 +32,7 @@ impl FromSql for SourceType {
     }
 }
 
-fn row_to_contract(row: &duckdb::Row) -> Result<PlainContract> {
+pub fn row_to_contract(row: &duckdb::Row) -> Result<PlainContract> {
     let source: String = row.get(0)?;
     let source_type: SourceType = row.get(1)?;
     let metadata: String = row.get(2)?;
@@ -167,6 +170,27 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             let metadata = serde_json::to_string(&metadata)?;
             rows.push([id, name, metadata, source, source_type.to_owned()]);
         }
+
+        app.append_rows(rows)?;
+
+        Ok(())
+    }
+
+    pub fn store_functions(&self, functions: &Vec<ContractFunction>) -> Result<()> {
+        let mut app = self.conn.appender("function")?;
+
+        let rows: Vec<[String; 6]> = functions
+            .iter()
+            .map(|f| {
+                let id = f.id.clone();
+                let contract_id = f.contract_id.clone();
+                let filename = f.filename.clone();
+                let signature = f.signature.clone();
+                let selector = f.selector.clone();
+                let source_code = f.source_code.clone();
+                [id, contract_id, filename, signature, selector, source_code]
+            })
+            .collect();
 
         app.append_rows(rows)?;
 

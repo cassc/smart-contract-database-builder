@@ -1,10 +1,10 @@
 use duckdb::ToSql;
 use eyre::{ContextCompat, Result};
 use foundry_compilers::{
-    artifacts::{LowFidelitySourceLocation, Node, NodeType::*, Settings},
+    artifacts::{Node, NodeType::*, Settings},
     multi::{MultiCompiler, MultiCompilerSettings},
     solc::{Solc, SolcCompiler},
-    Artifact, Project, ProjectCompileOutput, ProjectPathsConfig,
+    Project, ProjectCompileOutput, ProjectPathsConfig,
 };
 
 use itertools::Itertools;
@@ -311,14 +311,10 @@ impl PlainContract {
         let paths = ProjectPathsConfig::builder()
             .sources(source_path.clone())
             .remappings(settings.remappings)
-            .build_with_root(root_path);
+            .build_with_root(source_path.clone());
 
         let mut settings = MultiCompilerSettings::default();
-        let solc_settings = settings
-            .solc
-            .clone()
-            .with_ast()
-            .with_via_ir_minimum_optimization();
+        let solc_settings = settings.solc.clone().with_ast();
         settings.solc = solc_settings;
         let builder = Project::builder()
             .paths(paths)
@@ -357,7 +353,7 @@ impl PlainContract {
             .find(|(name, _)| name == contract_name)
             .context("Contract not found")?;
 
-        let (filename, _, artifact) = compilation_output
+        let (filename, _, _artifact) = compilation_output
             .artifacts_with_files()
             .find(|(_, name, _)| *name == contract_name)
             .context("Artifact not found")?;
@@ -376,46 +372,41 @@ impl PlainContract {
             .as_ref()
             .context("No source files in PlainContract")?
             .iter()
-            .find(|f| {
-                println!("Filename: {}, wanted: {}", f.name, filename.display());
-                f.name == filename.display().to_string()
-            })
+            .find(|f| f.name == filename.display().to_string())
             .context("No source file matches the expected file name")?
             .content;
 
-        // todo this does not search the parent folders
+        // TODO:
+        // 1. this does not find the function from parent contract
+        // 2. function from public field couldn't be found
         while nodes.len() > 1 {
             let node = nodes.pop().context("No node")?;
             match node.node_type {
-                ContractDefinition
-                | FunctionDefinition
-                | StructDefinition
-                | EnumDefinition
-                | UserDefinedValueTypeDefinition => {
-                    println!(
-                        "name: {:?}, expected: {}",
-                        node.attribute::<String>("name"),
-                        function_name
-                    );
-                    match node.attribute::<String>("name") {
-                        Some(name) if name == function_name => {
-                            let src = &node.src;
-                            let start = src.start;
-                            let fid = src.index.expect("No file index in source location");
-                            let length = src.length.expect("No length in source location");
-                            let source_code = &content.as_bytes()[start..start + length];
-                            let source_code = String::from_utf8_lossy(source_code);
-                            return Ok(source_code.into());
-                        }
-                        _ => {}
+                ContractDefinition => {
+                    if node.attribute::<String>("name") == Some(contract_name.into()) {
+                        let children = &node.nodes;
+                        nodes.extend(children);
                     }
                 }
+                FunctionDefinition => match node.attribute::<String>("name") {
+                    Some(name) if name == function_name => {
+                        let src = &node.src;
+                        let start = src.start;
+                        let _fid = src.index.expect("No file index in source location");
+                        let length = src.length.expect("No length in source location");
+                        let source_code = &content.as_bytes()[start..start + length];
+                        let source_code = String::from_utf8_lossy(source_code);
+                        return Ok(source_code.into());
+                    }
+                    _ => {}
+                },
                 _ => {
                     let children = &node.nodes;
                     nodes.extend(children);
                 }
             }
         }
+
         Err(eyre::eyre!("Function not found"))
     }
 
@@ -435,19 +426,12 @@ impl PlainContract {
                     .unwrap_or("".into());
 
                 if let Some(ref abi) = contract.abi {
-                    // let source_code = contract
-                    //     .source_file()
-                    //     .and_then(|f| f.ast)
-                    //     .map(|ast| format!("{:?}", ast.src))
-                    //     .unwrap_or("".into());
-                    // println!("Source code: {}", source_code);
-
                     abi.functions()
                         .map(|f| {
                             let function_name = &f.name;
                             let source_code = self
                                 .source_code_by_function_name(&contract_name, function_name)
-                                .unwrap();
+                                .unwrap_or("not-found".into());
 
                             ContractFunction::from_abi(
                                 contract_id.clone(),

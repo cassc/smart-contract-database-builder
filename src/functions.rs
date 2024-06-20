@@ -1,10 +1,6 @@
-use std::fmt::LowerHex;
-
+use crate::utils::simple_hash;
 use alloy_json_abi::Function;
 use serde::{Deserialize, Serialize};
-use tokio::signal;
-
-use crate::utils::simple_hash;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContractFunction {

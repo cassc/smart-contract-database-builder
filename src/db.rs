@@ -102,6 +102,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         Ok(Some(row_to_contract(row)?))
     }
 
+    #[allow(dead_code)]
     pub fn get_random_contract(
         &self,
         source_type: &ContractSourceType,
@@ -152,7 +153,6 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     /// Store multiple contracts in batch mode
     pub fn store_contracts(&self, contracts: Vec<PlainContract>) -> Result<()> {
         let mut app = self.conn.appender("contract")?;
-        let mut rows = Vec::new();
 
         for c in contracts {
             let PlainContract {
@@ -168,12 +168,31 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             };
             let source = serde_json::to_string(&source)?;
             let metadata = serde_json::to_string(&metadata)?;
-            rows.push([id, name, metadata, source, source_type.to_owned()]);
+            match app.append_row([id, name, metadata, source, source_type.to_owned()]) {
+                Ok(_) => {}
+                Err(e) => {
+                    let err = e.to_string().to_lowercase();
+                    if err.contains("constraint") {
+                        // ignore unique constraint error
+                        continue;
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
         }
 
-        app.append_rows(rows)?;
+        app.flush()?;
 
         Ok(())
+    }
+
+    pub fn count_contracts(&self) -> Result<u32> {
+        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM contract")?;
+        let mut rows = stmt.query([])?;
+        let row = rows.next()?.unwrap();
+        let count: u32 = row.get(0)?;
+        Ok(count)
     }
 
     pub fn store_functions(&self, functions: &Vec<ContractFunction>) -> Result<()> {

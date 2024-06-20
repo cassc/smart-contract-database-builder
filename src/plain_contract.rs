@@ -246,7 +246,7 @@ impl PlainContract {
         // 4. A multi-source contract containing multiple solidity files
         let contract_json = fs::read_to_string(format!("{}/contract.json", path)).await;
         let solidity_source = fs::read_to_string(format!("{}/main.sol", path)).await;
-        let viper_source = fs::read_to_string(format!("{}/main.sol", path)).await;
+        let viper_source = fs::read_to_string(format!("{}/main.vy", path)).await;
         match (contract_json, solidity_source, viper_source) {
             (Ok(contract_json), _, _) => {
                 let name = "contract.json".into();
@@ -289,7 +289,7 @@ impl PlainContract {
         let v = v.trim_start_matches('v');
         let version = Version::parse(v)?;
         let version = Version::new(version.major, version.minor, version.patch);
-        let solc = Solc::install(&version).await?;
+        let solc = Solc::find_or_install(&version)?;
         let solc = SolcCompiler::Specific(solc);
         let compiler = MultiCompiler::new(solc, None)?;
 

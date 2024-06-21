@@ -3,10 +3,11 @@ use db::{row_to_contract, Storage};
 use eyre::Result;
 use futures::future::try_join_all;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
-use log::info;
+use log::{error, info};
 use plain_contract::PlainContract;
 use std::{fmt::Write, sync::Arc};
 use tokio::{sync::Mutex, task};
+use utils::download_all_solc_versions;
 use walkdir::WalkDir;
 
 use crate::plain_contract::ContractSource;
@@ -45,13 +46,25 @@ struct PreProcessArgs {
 }
 
 #[derive(Parser)]
-struct IndexFunctionsArgs {}
+struct IndexFunctionsArgs {
+    /// How many contracts to process in one go
+    #[arg(long)]
+    chunk_size: usize,
+}
+
+#[derive(Parser)]
+struct DownloadSolcArgs {
+    /// Root folder for storing solc binaries
+    #[arg(long)]
+    solc_folder: Option<String>,
+}
 
 #[derive(Subcommand)]
 enum Commands {
     /// Preprocess the contracts with the given options
     PreProcess(PreProcessArgs),
     IndexFunctions(IndexFunctionsArgs),
+    DownloadSolc,
 }
 
 /// Load all plain contracts from the folder recursively
@@ -132,6 +145,8 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
                 .expect("Failed to store contracts");
         });
 
+        storage.conn.execute("PRAGMA checkpoint", [])?;
+
         pb.finish();
 
         info!("Finished processing plain contracts: {}", contracts.len());
@@ -139,9 +154,9 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
     Ok(())
 }
 
-async fn index_functions(storage: &mut Storage) -> Result<()> {
-    let total_countracts = storage.count_contracts()?;
-    let pb = ProgressBar::new(total_countracts as u64);
+async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Result<()> {
+    let total_countracts = storage.count_contracts()? as u64;
+    let pb = ProgressBar::new(total_countracts);
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -150,8 +165,8 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
             .progress_chars("#>-"),
     );
 
-    let mut i = 0;
-    let size = 100;
+    let mut i: u64 = 0;
+    let size = args.chunk_size as u64;
     loop {
         if i >= total_countracts {
             break;
@@ -181,8 +196,8 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
                         return;
                     }
                     if let Err(e) = contract.compile().await {
-                        log::error!("Failed to compile contract with id {} {}", contract.id(), e);
-                        panic!("Failed to compile contract");
+                        error!("Failed to compile contract with id {} {}", contract.id(), e);
+                        return;
                     }
 
                     match contract.extract_functions() {
@@ -205,11 +220,14 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
 
         try_join_all(compile_futures).await?;
 
+        i += size;
+
         let functions = functions.lock().await;
         storage.store_functions(&functions)?;
-        i += size;
-        pb.inc(size as u64);
+        pb.inc(size);
     }
+
+    storage.conn.execute("PRAGMA checkpoint", [])?;
 
     pb.finish();
 
@@ -230,8 +248,9 @@ async fn main() -> Result<()> {
     let mut storage = db::Storage::new(&duckdb_path)?;
 
     match &cli.command {
-        Commands::IndexFunctions(_) => index_functions(&mut storage).await,
+        Commands::IndexFunctions(args) => index_functions(&mut storage, args).await,
         Commands::PreProcess(args) => preprocess_contracts(&mut storage, args).await,
+        Commands::DownloadSolc => download_all_solc_versions().await,
     }
 }
 

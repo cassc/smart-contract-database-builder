@@ -26,6 +26,7 @@ foundry-compilers-artifacts = { version = "*", features = ["async"] }
 indicatif = { version = "0.17.8", features = ["tokio"] }
 futures = "0.3.30"
 num_cpus = "1.16.0"
+reqwest = "0.12.5"
 
 
 # ethers = { version = "2.0.14", features = ["ws"] }

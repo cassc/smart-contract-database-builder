@@ -96,6 +96,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     }
 
     /// Get contract by id
+    #[allow(dead_code)]
     pub fn get_contract(&self, id: &str) -> Result<Option<PlainContract>> {
         let mut stmt = self.conn.prepare(
             "SELECT source, source_type::varchar, metadata FROM contract WHERE id = ? limit 1",
@@ -135,6 +136,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     }
 
     /// Store a single contract
+    #[allow(dead_code)]
     pub fn store_contract(&self, contract: &PlainContract, id: Option<String>) -> Result<()> {
         let PlainContract {
             metadata, source, ..
@@ -160,10 +162,8 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     /// Store multiple contracts in batch mode
     pub fn store_contracts(&self, contracts: Vec<PlainContract>) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "INSERT INTO contract (id, name, metadata, source, source_type) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO contract (id, name, metadata, source, source_type) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
         )?;
-
-        self.conn.execute("BEGIN TRANSACTION", [])?;
 
         for c in contracts {
             let PlainContract {
@@ -179,11 +179,9 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             };
             let source = serde_json::to_string(&source)?;
             let metadata = serde_json::to_string(&metadata)?;
-
-            // ignore error
-            let _ = stmt.execute([id, name, metadata, source, source_type.into()]);
+            // allow error
+            let _ = stmt.insert([id, name, metadata, source, source_type.into()]);
         }
-        self.conn.execute("COMMIT", [])?;
 
         Ok(())
     }
@@ -196,23 +194,21 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         Ok(count)
     }
 
-    pub fn store_functions(&self, functions: &Vec<ContractFunction>) -> Result<()> {
-        let mut app = self.conn.appender("function")?;
+    pub fn store_functions(&self, functions: &[ContractFunction]) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "INSERT OR IGNORE INTO function (id, contract_id, filename, signature, selector, source_code) VALUES (?, ?, ?, ?, ?, ?)",
+        )?;
 
-        let rows: Vec<[String; 6]> = functions
-            .iter()
-            .map(|f| {
-                let id = f.id.clone();
-                let contract_id = f.contract_id.clone();
-                let filename = f.filename.clone();
-                let signature = f.signature.clone();
-                let selector = f.selector.clone();
-                let source_code = f.source_code.clone();
-                [id, contract_id, filename, signature, selector, source_code]
-            })
-            .collect();
-
-        app.append_rows(rows)?;
+        for f in functions.iter() {
+            let id = f.id.clone();
+            let contract_id = f.contract_id.clone();
+            let filename = f.filename.clone();
+            let signature = f.signature.clone();
+            let selector = f.selector.clone();
+            let source_code = f.source_code.clone();
+            // allow error
+            let _ = stmt.insert([id, contract_id, filename, signature, selector, source_code]);
+        }
 
         Ok(())
     }

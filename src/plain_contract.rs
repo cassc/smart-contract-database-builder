@@ -428,10 +428,11 @@ impl PlainContract {
                 if let Some(ref abi) = contract.abi {
                     abi.functions()
                         .map(|f| {
-                            let function_name = &f.name;
-                            let source_code = self
-                                .source_code_by_function_name(&contract_name, function_name)
-                                .unwrap_or("not-found".into());
+                            // let function_name = &f.name;
+                            // let source_code = self
+                            //     .source_code_by_function_name(&contract_name, function_name)
+                            //     .unwrap_or("not-found".into());
+                            let source_code = "".into();
 
                             ContractFunction::from_abi(
                                 contract_id.clone(),

@@ -91,6 +91,17 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
         let total_countracts = contracts.len();
         let pb = ProgressBar::new(total_countracts as u64);
 
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap()
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
+                write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
+            })
+            .progress_chars("#>-"),
+        );
+
         contracts.iter().for_each(|c| {
             let id = c.hash();
             pb.inc(1);

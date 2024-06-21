@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.7", features = ["derive"] }
-duckdb = "0.10.2"
+duckdb = { version = "0.10.2", features = ["bundled", "extensions-full"] }
 eyre = "0.6.12"
 itertools = "0.13.0"
 md5 = "0.7.0"

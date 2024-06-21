@@ -88,6 +88,13 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         Ok(Storage { conn })
     }
 
+    /// Disables checkpoint on shutdown
+    pub fn disable_checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute("PRAGMA disable_checkpoint_on_shutdown;", [])?;
+        Ok(())
+    }
+
     /// Get contract by id
     pub fn get_contract(&self, id: &str) -> Result<Option<PlainContract>> {
         let mut stmt = self.conn.prepare(
@@ -151,9 +158,12 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     }
 
     /// Store multiple contracts in batch mode
-    #[allow(dead_code)]
     pub fn store_contracts(&self, contracts: Vec<PlainContract>) -> Result<()> {
-        let mut app = self.conn.appender("contract")?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO contract (id, name, metadata, source, source_type) VALUES (?, ?, ?, ?, ?)",
+        )?;
+
+        self.conn.execute("BEGIN TRANSACTION", [])?;
 
         for c in contracts {
             let PlainContract {
@@ -169,21 +179,11 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
             };
             let source = serde_json::to_string(&source)?;
             let metadata = serde_json::to_string(&metadata)?;
-            match app.append_row([id, name, metadata, source, source_type.to_owned()]) {
-                Ok(_) => {}
-                Err(e) => {
-                    let err = e.to_string().to_lowercase();
-                    if err.contains("constraint") {
-                        // ignore unique constraint error
-                        continue;
-                    } else {
-                        return Err(e.into());
-                    }
-                }
-            }
-        }
 
-        app.flush()?;
+            // ignore error
+            let _ = stmt.execute([id, name, metadata, source, source_type.into()]);
+        }
+        self.conn.execute("COMMIT", [])?;
 
         Ok(())
     }

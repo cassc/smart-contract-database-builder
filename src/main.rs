@@ -38,6 +38,10 @@ struct PreProcessArgs {
     /// Optionally ignore errors during processing (default: false)
     #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
     ignore_errors: bool,
+
+    /// Chunk size, for faster importing contracts
+    #[arg(long)]
+    chunk_size: usize,
 }
 
 #[derive(Parser)]
@@ -82,9 +86,10 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
     let PreProcessArgs {
         plain_contracts_root,
         ignore_errors,
+        chunk_size,
     } = args;
     if let Some(plain_contracts_root) = plain_contracts_root {
-        let contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
+        let mut contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
 
         info!("Total contracts: {}", contracts.len());
 
@@ -102,21 +107,31 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
             .progress_chars("#>-"),
         );
 
-        contracts.iter().for_each(|c| {
-            let id = c.hash();
-            pb.inc(1);
-            match storage.get_contract(&id) {
-                Ok(None) => {
-                    storage.store_contract(c, Some(id)).unwrap();
-                }
-                Err(err) => {
-                    if !ignore_errors {
-                        panic!("Check contract existence got error: {}", err)
-                    }
-                }
-                _ => {}
-            }
+        // contracts.iter().for_each(|c| {
+        //     let id = c.hash();
+        //     pb.inc(1);
+        //     match storage.get_contract(&id) {
+        //         Ok(None) => {
+        //             storage.store_contract(c, Some(id)).unwrap();
+        //         }
+        //         Err(err) => {
+        //             if !ignore_errors {
+        //                 panic!("Check contract existence got error: {}", err)
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // });
+
+        storage.disable_checkpoint()?;
+        contracts.chunks_mut(*chunk_size).for_each(|chunk| {
+            pb.inc(*chunk_size as u64);
+            let contracts = chunk.to_vec();
+            storage
+                .store_contracts(contracts)
+                .expect("Failed to store contracts");
         });
+
         pb.finish();
 
         info!("Finished processing plain contracts: {}", contracts.len());

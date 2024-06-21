@@ -151,6 +151,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
     }
 
     /// Store multiple contracts in batch mode
+    #[allow(dead_code)]
     pub fn store_contracts(&self, contracts: Vec<PlainContract>) -> Result<()> {
         let mut app = self.conn.appender("contract")?;
 

@@ -1,10 +1,11 @@
 use clap::{ArgAction, Parser, Subcommand};
 use db::{row_to_contract, Storage};
 use eyre::Result;
-use indicatif::{ProgressBar, ProgressStyle};
+use futures::future::try_join_all;
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use log::info;
 use plain_contract::PlainContract;
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 use tokio::{sync::Mutex, task};
 use walkdir::WalkDir;
 
@@ -37,10 +38,6 @@ struct PreProcessArgs {
     /// Optionally ignore errors during processing (default: false)
     #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
     ignore_errors: bool,
-
-    /// Optinal chunk size, for faster importing contracts. Use this only if you have an empty database to start with
-    #[arg(long)]
-    chunk_size: Option<usize>,
 }
 
 #[derive(Parser)]
@@ -82,47 +79,45 @@ pub async fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<Pla
 }
 
 async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> Result<()> {
-    let pb = ProgressBar::new(100);
     let PreProcessArgs {
         plain_contracts_root,
         ignore_errors,
-        chunk_size,
     } = args;
     if let Some(plain_contracts_root) = plain_contracts_root {
-        let mut contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
+        let contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
 
         info!("Total contracts: {}", contracts.len());
 
         let total_countracts = contracts.len();
-        let chunk_size = chunk_size.unwrap_or(0);
-        if chunk_size <= 1 {
-            contracts.iter().for_each(|c| {
-                let id = c.hash();
-                pb.inc((100 / total_countracts) as u64);
-                match storage.get_contract(&id) {
-                    Ok(None) => {
-                        storage.store_contract(c, Some(id)).unwrap();
-                    }
-                    Err(err) => {
-                        if !ignore_errors {
-                            panic!("Check contract existence got error: {}", err)
-                        }
-                    }
-                    _ => {}
-                }
-            });
-        } else {
-            // TODO no data written to db?
-            contracts.chunks_mut(chunk_size).for_each(|chunk| {
-                pb.inc((chunk_size * 100 / total_countracts) as u64);
-                let contracts = chunk.to_vec();
-                storage
-                    .store_contracts(contracts)
-                    .expect("Failed to store contracts");
-            });
-        }
+        let pb = ProgressBar::new(total_countracts as u64);
 
-        pb.finish_with_message("done");
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] ({eta})",
+            )
+            .unwrap()
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
+                write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
+            })
+            .progress_chars("#>-"),
+        );
+
+        contracts.iter().for_each(|c| {
+            let id = c.hash();
+            pb.inc(1);
+            match storage.get_contract(&id) {
+                Ok(None) => {
+                    storage.store_contract(c, Some(id)).unwrap();
+                }
+                Err(err) => {
+                    if !ignore_errors {
+                        panic!("Check contract existence got error: {}", err)
+                    }
+                }
+                _ => {}
+            }
+        });
+        pb.finish();
 
         info!("Finished processing plain contracts: {}", contracts.len());
     }
@@ -130,7 +125,8 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
 }
 
 async fn index_functions(storage: &mut Storage) -> Result<()> {
-    let pb = ProgressBar::new(100);
+    let total_countracts = storage.count_contracts()?;
+    let pb = ProgressBar::new(total_countracts as u64);
     pb.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -139,7 +135,6 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
             .progress_chars("#>-"),
     );
 
-    let total_countracts = storage.count_contracts()?;
     let mut i = 0;
     let size = 100;
     loop {
@@ -170,16 +165,9 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
                     if matches!(contract.source, ContractSource::Vyper(_)) {
                         return;
                     }
-                    match contract.compile().await {
-                        Err(e) => {
-                            log::error!(
-                                "Failed to compile contract with id {} {}",
-                                contract.id(),
-                                e
-                            );
-                            panic!("Failed to compile contract");
-                        }
-                        _ => {}
+                    if let Err(e) = contract.compile().await {
+                        log::error!("Failed to compile contract with id {} {}", contract.id(), e);
+                        panic!("Failed to compile contract");
                     }
 
                     match contract.extract_functions() {
@@ -200,16 +188,15 @@ async fn index_functions(storage: &mut Storage) -> Result<()> {
             })
             .collect();
 
-        use futures::future::try_join_all;
         try_join_all(compile_futures).await?;
 
         let functions = functions.lock().await;
         storage.store_functions(&functions)?;
         i += size;
-        pb.inc((size * 100 / total_countracts) as u64);
+        pb.inc(size as u64);
     }
 
-    pb.finish_with_message("done");
+    pb.finish();
 
     Ok(())
 }

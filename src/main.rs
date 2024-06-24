@@ -120,22 +120,6 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
             .progress_chars("#>-"),
         );
 
-        // contracts.iter().for_each(|c| {
-        //     let id = c.hash();
-        //     pb.inc(1);
-        //     match storage.get_contract(&id) {
-        //         Ok(None) => {
-        //             storage.store_contract(c, Some(id)).unwrap();
-        //         }
-        //         Err(err) => {
-        //             if !ignore_errors {
-        //                 panic!("Check contract existence got error: {}", err)
-        //             }
-        //         }
-        //         _ => {}
-        //     }
-        // });
-
         storage.disable_checkpoint()?;
         contracts.chunks_mut(*chunk_size).for_each(|chunk| {
             pb.inc(*chunk_size as u64);
@@ -145,7 +129,7 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
                 .expect("Failed to store contracts");
         });
 
-        storage.conn.execute("PRAGMA checkpoint", [])?;
+        storage.enable_checkpoint()?;
 
         pb.finish();
 
@@ -227,7 +211,7 @@ async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Re
         pb.inc(size);
     }
 
-    storage.conn.execute("PRAGMA checkpoint", [])?;
+    storage.enable_checkpoint()?;
 
     pb.finish();
 

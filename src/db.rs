@@ -97,6 +97,13 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         Ok(())
     }
 
+    /// Enable checkpoint on shutdown
+    pub fn enable_checkpoint(&self) -> Result<()> {
+        self.conn
+            .execute("PRAGMA enable_checkpoint_on_shutdown;", [])?;
+        Ok(())
+    }
+
     /// Get contract by id
     #[allow(dead_code)]
     pub fn get_contract(&self, id: &str) -> Result<Option<PlainContract>> {

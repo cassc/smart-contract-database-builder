@@ -154,19 +154,6 @@ impl ContractSource {
         }
     }
 
-    /// Copy and expand the source code files to file system
-    /// NOTE: copied from foundry
-    pub async fn write_to(&self, dir: &Path) -> Result<()> {
-        create_dir_all(dir).await?;
-        let entries = match self {
-            ContractSource::SingleSolidity(source) => vec![source],
-            ContractSource::MultiSolidity(sources) => sources.iter().collect(),
-            ContractSource::Vyper(source) => vec![source],
-            ContractSource::Json(source) => vec![source],
-        };
-        Self::write_entries(dir, &entries).await
-    }
-
     fn get_source_files(&self) -> Result<Vec<SourceFile>> {
         match self {
             ContractSource::SingleSolidity(source) => Ok(vec![source.clone()]),
@@ -350,25 +337,30 @@ impl PlainContract {
             .compilation_output
             .as_ref()
             .context("No compilation output, did you forget to call compile()?")?;
+
+        // Contract by artifact
         let contract = compilation_output
             .artifacts()
             .find(|(name, _)| name == contract_name)
             .context("Contract not found")?;
 
+        // Find the source file of the contract
         let (filename, _, _artifact) = compilation_output
             .artifacts_with_files()
             .find(|(_, name, _)| *name == contract_name)
             .context("Artifact not found")?;
 
         let source_file = contract.1.source_file();
-        let mut nodes: Vec<&Node> = source_file
+
+        // AST nodes in the source file
+        let mut nodes_in_source: Vec<&Node> = source_file
             .as_ref()
             .and_then(|f| f.ast.as_ref())
             .map(|ast| ast.nodes.iter())
             .unwrap_or_default()
             .collect();
 
-        // get the source code
+        // The complete source code as text in the file
         let content = &self
             .source_files
             .as_ref()
@@ -378,25 +370,43 @@ impl PlainContract {
             .context("No source file matches the expected file name")?
             .content;
 
+        let mut nodes_in_contract = vec![];
+
+        while nodes_in_source.len() > 1 {
+            let node = nodes_in_source.pop().context("No node")?;
+            match node.node_type {
+                ContractDefinition
+                    if node.attribute::<String>("name") == Some(contract_name.into()) =>
+                {
+                    nodes_in_contract.extend(&node.nodes);
+                    break;
+                }
+                _ => {
+                    let children = &node.nodes;
+                    nodes_in_source.extend(children);
+                }
+            }
+        }
+
         // NOTE:
         // 1. this does not find the function from parent contract
         // 2. function from public field couldn't be found
-        while nodes.len() > 1 {
-            let node = nodes.pop().context("No node")?;
+        while nodes_in_contract.len() > 1 {
+            let node = nodes_in_contract.pop().context("No node")?;
             match node.node_type {
-                ContractDefinition => {
-                    if node.attribute::<String>("name") == Some(contract_name.into()) {
-                        let children = &node.nodes;
-                        nodes.extend(children);
-                    }
-                }
                 FunctionDefinition => match node.attribute::<String>("name") {
                     Some(name) if name == function_name => {
                         let src = &node.src;
+                        println!(
+                            "found source for {} {} {:?}",
+                            function_name, src.start, src.length
+                        );
                         let start = src.start;
                         let _fid = src.index.expect("No file index in source location");
                         let length = src.length.expect("No length in source location");
-                        let source_code = &content.as_bytes()[start..start + length];
+                        let bytes = &content.as_bytes();
+                        println!("content byte length {}", bytes.len()); // this gives incorrect value compared to python
+                        let source_code = &bytes[start..start + length];
                         let source_code = String::from_utf8_lossy(source_code);
                         return Ok(source_code.into());
                     }
@@ -404,7 +414,7 @@ impl PlainContract {
                 },
                 _ => {
                     let children = &node.nodes;
-                    nodes.extend(children);
+                    nodes_in_contract.extend(children);
                 }
             }
         }
@@ -455,6 +465,16 @@ impl PlainContract {
 
         Ok(functions.flatten().collect())
     }
+
+    /// Export source code to the output folder
+    pub async fn export_source_code(&self, output_folder: &str) -> Result<()> {
+        let root_path = PathBuf::from(output_folder);
+        let source_path = root_path.join(&self.metadata.contract_name);
+
+        let source_files = self.get_source_files()?;
+
+        ContractSource::write_entries(&source_path, &source_files.iter().collect()).await
+    }
 }
 
 #[cfg(test)]
@@ -470,29 +490,27 @@ mod test {
             .artifacts()
             .find(|(name, _)| name == "AdvancedCounter");
 
-        let ast = artificat
+        let _ast = artificat
             .expect("No AdvancedCounter contract")
             .1
             .source_file()
             .unwrap()
             .ast;
-        println!("{:#?}", ast);
 
         let source = contract.source_code_by_contract_and_function_name("Counter", "decrement");
         let expected_found =
             "function decrement() public override {\n        count = count.subtract(1);\n    }";
 
-        println!("{:?}", source);
         assert!(matches!(source, Ok(found) if found == expected_found));
 
         let source =
             contract.source_code_by_contract_and_function_name("AdvancedCounter", "decrement");
-        println!("{:?}", source);
+
         assert!(matches!(source, Err(_e)));
 
         // Note:
         let source = contract.source_code_by_contract_and_function_name("Counter", "count");
-        println!("{:?}", source);
+
         assert!(matches!(source, Err(_e)));
 
         Ok(())

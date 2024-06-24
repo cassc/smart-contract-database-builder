@@ -59,12 +59,26 @@ struct DownloadSolcArgs {
     solc_folder: Option<String>,
 }
 
+#[derive(Parser)]
+struct ExportSourceArgs {
+    /// The contract id to export
+    #[arg(long)]
+    contract_id: String,
+    /// Output folder to store the source code
+    #[arg(long)]
+    output_folder: String,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Preprocess the contracts with the given options
     PreProcess(PreProcessArgs),
+    /// Compile all contracts and store populate the `function` table
     IndexFunctions(IndexFunctionsArgs),
+    /// Download all solc binaries
     DownloadSolc,
+    /// Export source code of a contract
+    ExportSource(ExportSourceArgs),
 }
 
 /// Load all plain contracts from the folder recursively
@@ -93,6 +107,14 @@ pub async fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<Pla
         }
     }
     contracts
+}
+
+async fn export_source(storage: &mut Storage, args: &ExportSourceArgs) -> Result<()> {
+    let contract = storage
+        .get_contract(&args.contract_id)?
+        .expect("Contract not found");
+
+    contract.export_source_code(&args.output_folder).await
 }
 
 async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> Result<()> {
@@ -235,6 +257,7 @@ async fn main() -> Result<()> {
         Commands::IndexFunctions(args) => index_functions(&mut storage, args).await,
         Commands::PreProcess(args) => preprocess_contracts(&mut storage, args).await,
         Commands::DownloadSolc => download_all_solc_versions().await,
+        Commands::ExportSource(args) => export_source(&mut storage, args).await,
     }
 }
 
@@ -244,8 +267,6 @@ mod tests {
 
     use super::*;
     use crate::plain_contract::ContractSourceType;
-
-    const TEST_DUCKDB_PATH: &str = "/home/garfield/tmp/contracts.duckdb";
 
     async fn compile_and_extract_function(contract: &mut PlainContract) -> Result<()> {
         info!("Compiling contract: {}", contract.id());
@@ -297,9 +318,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_compile_and_extract_functions() -> Result<()> {
-        let mut storage = Storage::new(TEST_DUCKDB_PATH).unwrap();
+        let duckdb_path = std::env::var("TEST_DUCKDB_PATH").expect("Test db is required");
+        let mut storage = Storage::new(&duckdb_path).unwrap();
         compile_standard_json(&mut storage).await?;
         compile_single_source_file(&mut storage).await?;
         compile_multi_source_files(&mut storage).await
+    }
+
+    #[tokio::test]
+    async fn get_source_code_by_function_complex() -> Result<()> {
+        let duckdb_path = std::env::var("TEST_DUCKDB_PATH").expect("Test db is required");
+        let contract_id = "1e889892cd854c8a85230ff7bd5a2935";
+        let storage = Storage::new(&duckdb_path)?;
+        let mut contract = storage
+            .get_contract(contract_id)?
+            .expect("Contract not found");
+        contract.compile().await?;
+
+        let source = contract.source_code_by_contract_and_function_name(
+            "TransparentUpgradeableProxy",
+            "upgradeTo",
+        )?;
+
+        println!("{source}");
+
+        Ok(())
     }
 }

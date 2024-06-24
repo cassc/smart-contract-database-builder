@@ -28,7 +28,6 @@ futures = "0.3.30"
 num_cpus = "1.16.0"
 reqwest = "0.12.5"
 
-
-# ethers = { version = "2.0.14", features = ["ws"] }
-# foundry-compilers-artifacts-solc = { version = "*", features = ["async"] }
-# foundry-compilers-artifacts-vyper = "*"
+[features]
+default = []
+duckdb-bundled = ["duckdb/bundled"]

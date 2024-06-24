@@ -12,6 +12,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fmt::Display,
     path::{Component, Path, PathBuf},
 };
 use tokio::fs::{self, create_dir_all};
@@ -77,13 +78,13 @@ pub enum ContractSourceType {
     Json,
 }
 
-impl ToString for ContractSourceType {
-    fn to_string(&self) -> String {
+impl Display for ContractSourceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContractSourceType::SingleSolidity => "single_sol".into(),
-            ContractSourceType::MultiSolidity => "multi_sol".into(),
-            ContractSourceType::Vyper => "vyper".into(),
-            ContractSourceType::Json => "json".into(),
+            ContractSourceType::SingleSolidity => write!(f, "single_sol"),
+            ContractSourceType::MultiSolidity => write!(f, "multi_sol"),
+            ContractSourceType::Vyper => write!(f, "vyper"),
+            ContractSourceType::Json => write!(f, "json"),
         }
     }
 }
@@ -339,7 +340,8 @@ impl PlainContract {
         }
     }
 
-    pub fn source_code_by_function_name(
+    /// Search the function source code by contract and function name from the AST
+    pub fn source_code_by_contract_and_function_name(
         &self,
         contract_name: &str,
         function_name: &str,
@@ -347,7 +349,7 @@ impl PlainContract {
         let compilation_output = self
             .compilation_output
             .as_ref()
-            .context("No compilation output")?;
+            .context("No compilation output, did you forget to call compile()?")?;
         let contract = compilation_output
             .artifacts()
             .find(|(name, _)| name == contract_name)
@@ -366,7 +368,7 @@ impl PlainContract {
             .unwrap_or_default()
             .collect();
 
-        // NOTE: can we get the source code from the compilation output
+        // get the source code
         let content = &self
             .source_files
             .as_ref()
@@ -376,7 +378,7 @@ impl PlainContract {
             .context("No source file matches the expected file name")?
             .content;
 
-        // TODO:
+        // NOTE:
         // 1. this does not find the function from parent contract
         // 2. function from public field couldn't be found
         while nodes.len() > 1 {
@@ -410,6 +412,7 @@ impl PlainContract {
         Err(eyre::eyre!("Function not found"))
     }
 
+    /// Return a list of functions from the contract ABI.
     pub fn extract_functions(&self) -> Result<Vec<ContractFunction>> {
         let compilation_output = self
             .compilation_output
@@ -428,11 +431,13 @@ impl PlainContract {
                 if let Some(ref abi) = contract.abi {
                     abi.functions()
                         .map(|f| {
-                            // let function_name = &f.name;
-                            // let source_code = self
-                            //     .source_code_by_function_name(&contract_name, function_name)
-                            //     .unwrap_or("not-found".into());
-                            let source_code = "".into();
+                            let function_name = &f.name;
+                            let source_code = self
+                                .source_code_by_contract_and_function_name(
+                                    &contract_name,
+                                    function_name,
+                                )
+                                .unwrap_or("".into());
 
                             ContractFunction::from_abi(
                                 contract_id.clone(),
@@ -449,5 +454,47 @@ impl PlainContract {
             });
 
         Ok(functions.flatten().collect())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[tokio::test]
+    async fn compile_and_get_source_by_function() -> Result<()> {
+        let mut contract = PlainContract::from_folder("./contracts/demo").await?;
+
+        let output = contract.compile().await?;
+        let artificat = output
+            .artifacts()
+            .find(|(name, _)| name == "AdvancedCounter");
+
+        let ast = artificat
+            .expect("No AdvancedCounter contract")
+            .1
+            .source_file()
+            .unwrap()
+            .ast;
+        println!("{:#?}", ast);
+
+        let source = contract.source_code_by_contract_and_function_name("Counter", "decrement");
+        let expected_found =
+            "function decrement() public override {\n        count = count.subtract(1);\n    }";
+
+        println!("{:?}", source);
+        assert!(matches!(source, Ok(found) if found == expected_found));
+
+        let source =
+            contract.source_code_by_contract_and_function_name("AdvancedCounter", "decrement");
+        println!("{:?}", source);
+        assert!(matches!(source, Err(_e)));
+
+        // Note:
+        let source = contract.source_code_by_contract_and_function_name("Counter", "count");
+        println!("{:?}", source);
+        assert!(matches!(source, Err(_e)));
+
+        Ok(())
     }
 }

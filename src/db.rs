@@ -74,6 +74,8 @@ CREATE TABLE contract (
 CREATE TABLE function (
     id STRING PRIMARY KEY,
     contract_id STRING,
+    contract_name STRING,
+    function_name STRING,
     filename STRING,
     signature STRING,
     selector STRING,
@@ -196,18 +198,29 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
 
     pub fn store_functions(&self, functions: &[ContractFunction]) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "INSERT OR IGNORE INTO function (id, contract_id, filename, signature, selector, source_code) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO function (id, contract_id, contract_name, function_name, filename, signature, selector, source_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         for f in functions.iter() {
             let id = f.id.clone();
             let contract_id = f.contract_id.clone();
+            let contract_name = f.contract_name.clone();
+            let function_name = f.function_name.clone();
             let filename = f.filename.clone();
             let signature = f.signature.clone();
             let selector = f.selector.clone();
             let source_code = f.source_code.clone();
             // allow error
-            let _ = stmt.insert([id, contract_id, filename, signature, selector, source_code]);
+            let _ = stmt.insert([
+                id,
+                contract_id,
+                contract_name,
+                function_name,
+                filename,
+                signature,
+                selector,
+                source_code,
+            ]);
         }
 
         Ok(())

@@ -370,6 +370,11 @@ impl PlainContract {
             .context("No source file matches the expected file name")?
             .content;
 
+        // Normalize text, need this because foundry-compile does this before
+        // compilation, without it offset will be wrong
+        // Ref: crates/artifacts/solc/src/sources.rs
+        let content = content.replace("\r\n", "\n");
+
         let mut nodes_in_contract = vec![];
 
         while nodes_in_source.len() > 1 {
@@ -405,7 +410,6 @@ impl PlainContract {
                         let _fid = src.index.expect("No file index in source location");
                         let length = src.length.expect("No length in source location");
                         let bytes = &content.as_bytes();
-                        println!("content byte length {}", bytes.len()); // this gives incorrect value compared to python
                         let source_code = &bytes[start..start + length];
                         let source_code = String::from_utf8_lossy(source_code);
                         return Ok(source_code.into());
@@ -498,6 +502,7 @@ mod test {
             .ast;
 
         let source = contract.source_code_by_contract_and_function_name("Counter", "decrement");
+        println!("{:?}", source);
         let expected_found =
             "function decrement() public override {\n        count = count.subtract(1);\n    }";
 

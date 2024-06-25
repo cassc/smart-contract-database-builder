@@ -402,10 +402,6 @@ impl PlainContract {
                 FunctionDefinition => match node.attribute::<String>("name") {
                     Some(name) if name == function_name => {
                         let src = &node.src;
-                        println!(
-                            "found source for {} {} {:?}",
-                            function_name, src.start, src.length
-                        );
                         let start = src.start;
                         let _fid = src.index.expect("No file index in source location");
                         let length = src.length.expect("No length in source location");

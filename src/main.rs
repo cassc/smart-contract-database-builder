@@ -269,7 +269,7 @@ mod tests {
     use crate::plain_contract::ContractSourceType;
 
     async fn compile_and_extract_function(contract: &mut PlainContract) -> Result<()> {
-        info!("Compiling contract: {}", contract.id());
+        println!("Compiling contract: {}", contract.id());
         let output = contract.compile().await?.succeeded();
         output.assert_success();
         assert!(output.artifacts().count() > 0);

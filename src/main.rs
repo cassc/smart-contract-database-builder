@@ -122,8 +122,15 @@ pub async fn process_etherscan_contracts(root: &str, ignore_errors: bool) -> Vec
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
-            let parent = e.path().parent().unwrap();
-            let folder = parent.file_name().unwrap().to_string_lossy();
+            let folder = {
+                match e.path().parent() {
+                    None => return false,
+                    Some(parent) => match parent.file_name() {
+                        None => return false,
+                        Some(name) => name.to_string_lossy(),
+                    },
+                }
+            };
             let filename = e.file_name().to_string_lossy();
 
             filename.starts_with(&*folder)

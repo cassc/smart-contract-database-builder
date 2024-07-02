@@ -35,14 +35,40 @@ pub struct Metadata {
     pub bytecode_hash: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EtherscanRawJson {
+    #[serde(rename = "SourceCode")]
+    pub source_code: String,
+    #[serde(rename = "OptimizationUsed")]
+    pub optimization_used: String,
+    #[serde(rename = "Runs")]
+    pub runs: String,
+    #[serde(rename = "ContractName")]
+    pub contract_name: String,
+    #[serde(rename = "CompilerVersion")]
+    pub compiler_version: String,
+}
+
+impl EtherscanRawJson {
+    pub fn to_metadata(&self) -> Metadata {
+        Metadata {
+            contract_name: self.contract_name.clone(),
+            compiler_version: self.compiler_version.clone(),
+            runs: self.runs.parse().unwrap_or(0),
+            optimization_used: self.optimization_used == "1",
+            bytecode_hash: "".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceCodeEntry {
     pub content: String,
 }
 
-/// Etherscan json file
+/// Standard json input file
 #[derive(Debug, Serialize, Deserialize)]
-pub struct EtherscanJson {
+pub struct StandardJson {
     pub langauge: Option<String>,
     pub name: Option<String>,
     pub sources: HashMap<String, SourceCodeEntry>,
@@ -160,7 +186,7 @@ impl ContractSource {
             ContractSource::MultiSolidity(sources) => Ok(sources.clone()),
             ContractSource::Vyper(source) => Ok(vec![source.clone()]),
             ContractSource::Json(source) => {
-                let json: EtherscanJson = serde_json::from_str(&source.content)?;
+                let json: StandardJson = serde_json::from_str(&source.content)?;
 
                 let sources: Vec<SourceFile> = json
                     .sources
@@ -220,6 +246,38 @@ impl PlainContract {
 
     pub fn id(&self) -> String {
         self.hash()
+    }
+
+    /// Parser a contract from etherscan json
+    pub async fn from_etherscan_json(path: &str) -> Result<Self> {
+        let name = "contract.json".into();
+        let content = fs::read_to_string(path).await?;
+        let outer_json: EtherscanRawJson = serde_json::from_str(&content)?;
+        let metadata = outer_json.to_metadata();
+        let source_code = &outer_json.source_code;
+        let source_code = if source_code.starts_with("{{") {
+            let len = source_code.len();
+            &source_code[1..len - 1]
+        } else {
+            &source_code[..]
+        };
+
+        match serde_json::from_str::<StandardJson>(source_code) {
+            Ok(_std_json) => {
+                let source = ContractSource::Json(SourceFile {
+                    name,
+                    content: source_code.into(),
+                });
+                Ok(Self::new(metadata, source))
+            }
+            Err(_) => Ok(Self::new(
+                metadata,
+                ContractSource::SingleSolidity(SourceFile {
+                    name: "main.sol".into(),
+                    content: source_code.into(),
+                }),
+            )),
+        }
     }
 
     /// Parse a contract from a folder path
@@ -285,7 +343,7 @@ impl PlainContract {
 
         // TODO json is parsed twice, also parsed in writting source files for ether json
         if let ContractSource::Json(ref source) = self.source {
-            let json: EtherscanJson = serde_json::from_str(&source.content)?;
+            let json: StandardJson = serde_json::from_str(&source.content)?;
             settings = json.settings.context("Missing settings in json")?;
 
             for remapping in settings.remappings.iter_mut() {
@@ -514,6 +572,18 @@ mod test {
 
         assert!(matches!(source, Err(_e)));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parse_etherscan_contract() -> Result<()> {
+        let mut contract = PlainContract::from_etherscan_json(
+            "./contracts/0x9ca84eacf0d0775782ab5b34d01187b37f1ceea4_Bueno721Drop.json",
+        )
+        .await?;
+        contract.compile().await?;
+        let functions = contract.extract_functions()?;
+        println!("{:?}", functions);
         Ok(())
     }
 }

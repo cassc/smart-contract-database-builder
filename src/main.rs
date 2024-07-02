@@ -3,7 +3,7 @@ use db::{row_to_contract, Storage};
 use eyre::Result;
 use futures::future::try_join_all;
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
-use log::{error, info};
+use log::{debug, error, info};
 use plain_contract::PlainContract;
 use std::{fmt::Write, sync::Arc};
 use tokio::{sync::Mutex, task};
@@ -34,7 +34,12 @@ struct PreProcessArgs {
     ///
     /// Example https://huggingface.co/datasets/Zellic/smart-contract-fiesta/tree/main/organized_contracts
     #[arg(long)]
-    plain_contracts_root: Option<String>,
+    metadata_contracts_root: Option<String>,
+
+    /// Folder containing etherscan contracts. Each contract contains a json file
+    /// which contains both the metadata and the source code
+    #[arg(long)]
+    etherscan_contracts_root: Option<String>,
 
     /// Optionally ignore errors during processing (default: false)
     #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
@@ -81,8 +86,8 @@ enum Commands {
     ExportSource(ExportSourceArgs),
 }
 
-/// Load all plain contracts from the folder recursively
-pub async fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
+/// Search for all folders containing `metadata.json` and process them
+pub async fn process_metadata_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
     let mut contracts = Vec::with_capacity(12800);
     for entry in WalkDir::new(root)
         .follow_links(true)
@@ -109,6 +114,44 @@ pub async fn process_plain_contracts(root: &str, ignore_errors: bool) -> Vec<Pla
     contracts
 }
 
+/// Search and process etherscan json files and process
+pub async fn process_etherscan_contracts(root: &str, ignore_errors: bool) -> Vec<PlainContract> {
+    let mut contracts = Vec::with_capacity(12800);
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let parent = e.path().parent().unwrap();
+            let folder = parent.file_name().unwrap().to_string_lossy();
+            let filename = e.file_name().to_string_lossy();
+
+            filename.starts_with(&*folder)
+                && e.file_type().is_file()
+                && e.file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .ends_with(".json")
+        })
+    {
+        let path = entry.path();
+        match PlainContract::from_etherscan_json(&path.to_string_lossy()).await {
+            Ok(c) => {
+                contracts.push(c);
+            }
+            Err(error) => {
+                if ignore_errors {
+                    debug!("Process file failed with error {error} {path:?}")
+                } else {
+                    panic!("Process file failed with error {error} {path:?}")
+                }
+            }
+        }
+    }
+
+    contracts
+}
+
 async fn export_source(storage: &mut Storage, args: &ExportSourceArgs) -> Result<()> {
     let contract = storage
         .get_contract(&args.contract_id)?
@@ -119,19 +162,25 @@ async fn export_source(storage: &mut Storage, args: &ExportSourceArgs) -> Result
 
 async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> Result<()> {
     let PreProcessArgs {
-        plain_contracts_root,
+        metadata_contracts_root,
+        etherscan_contracts_root,
         ignore_errors,
         chunk_size,
     } = args;
-    if let Some(plain_contracts_root) = plain_contracts_root {
-        let mut contracts = process_plain_contracts(plain_contracts_root, *ignore_errors).await;
+    match (metadata_contracts_root, etherscan_contracts_root) {
+        (None, None) => {
+            panic!("At least one of the metadata_contracts_root or etherscan_contracts_root should be provided")
+        }
+        (Some(metadata_contracts_root), None) => {
+            let mut contracts =
+                process_metadata_contracts(metadata_contracts_root, *ignore_errors).await;
 
-        info!("Total contracts: {}", contracts.len());
+            info!("Total contracts: {}", contracts.len());
 
-        let total_countracts = contracts.len();
-        let pb = ProgressBar::new(total_countracts as u64);
+            let total_countracts = contracts.len();
+            let pb = ProgressBar::new(total_countracts as u64);
 
-        pb.set_style(
+            pb.set_style(
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
             )
@@ -142,22 +191,63 @@ async fn preprocess_contracts(storage: &mut Storage, args: &PreProcessArgs) -> R
             .progress_chars("#>-"),
         );
 
-        storage.disable_checkpoint()?;
-        contracts.chunks_mut(*chunk_size).for_each(|chunk| {
-            pb.inc(*chunk_size as u64);
-            let contracts = chunk.to_vec();
-            storage
-                .store_contracts(contracts)
-                .expect("Failed to store contracts");
-        });
+            storage.disable_checkpoint()?;
+            contracts.chunks_mut(*chunk_size).for_each(|chunk| {
+                pb.inc(*chunk_size as u64);
+                let contracts = chunk.to_vec();
+                storage
+                    .store_contracts(contracts)
+                    .expect("Failed to store contracts");
+            });
 
-        storage.enable_checkpoint()?;
+            storage.enable_checkpoint()?;
 
-        pb.finish();
+            pb.finish();
 
-        info!("Finished processing plain contracts: {}", contracts.len());
+            info!("Finished processing plain contracts: {}", contracts.len());
+            Ok(())
+        }
+        (None, Some(etherscan_contracts_root)) => {
+            let mut contracts =
+                process_etherscan_contracts(etherscan_contracts_root, *ignore_errors).await;
+
+            info!("Total contracts: {}", contracts.len());
+
+            let total_countracts = contracts.len();
+            let pb = ProgressBar::new(total_countracts as u64);
+
+            pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})",
+            )
+            .unwrap()
+            .with_key("eta", |state: &ProgressState, w: &mut dyn Write| {
+                write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap()
+            })
+            .progress_chars("#>-"),
+            );
+
+            storage.disable_checkpoint()?;
+            contracts.chunks_mut(*chunk_size).for_each(|chunk| {
+                pb.inc(*chunk_size as u64);
+                let contracts = chunk.to_vec();
+                storage
+                    .store_contracts(contracts)
+                    .expect("Failed to store contracts");
+            });
+
+            storage.enable_checkpoint()?;
+
+            pb.finish();
+
+            info!("Finished processing plain contracts: {}", contracts.len());
+
+            Ok(())
+        }
+        _ => {
+            panic!("Only one of metadata_contracts_root or etherscan_contracts_root should be provided")
+        }
     }
-    Ok(())
 }
 
 async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Result<()> {

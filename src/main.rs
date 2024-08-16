@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_source_code_by_function_complex() -> Result<()> {
+    async fn test_get_source_code_by_function_complex() -> Result<()> {
         let contract_id = "1e889892cd854c8a85230ff7bd5a2935";
         let storage = Storage::new(TEST_DB_PATH)?;
         let mut contract = storage
@@ -427,25 +427,24 @@ mod tests {
             .expect("Contract not found");
         contract.compile().await?;
 
-        let source = contract.source_code_by_contract_and_function_name(
+        let _source = contract.source_code_by_contract_and_function_name(
             "TransparentUpgradeableProxy",
             "upgradeTo",
         )?;
-
-        println!("{source}");
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_extract_source() -> Result<()> {
+    async fn test_get_extract_source() -> Result<()> {
         let storage = Storage::new(TEST_DB_PATH)?;
         let contract_ids = vec![
             "af1d91600db88a681f3988c4d3935166",
-            "eebec572cb1ab02cd86c60d169767f84",
+            "eebec572cb1ab02cd86c60d169767f84", // has `main` instead of `main.sol`
         ];
 
         for contract_id in contract_ids {
+            println!("Processing contract: {}", contract_id);
             let mut contract = storage
                 .get_contract(contract_id)?
                 .expect("Contract not found");
@@ -453,7 +452,11 @@ mod tests {
 
             let functions = contract.extract_functions()?;
 
-            assert!(!functions.is_empty());
+            assert!(
+                !functions.is_empty(),
+                "No functions found for contract {}",
+                contract_id
+            );
         }
 
         Ok(())

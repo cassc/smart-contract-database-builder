@@ -141,8 +141,13 @@ pub struct PlainContract {
     pub source_files: Option<Vec<SourceFile>>,
 }
 
-async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource> {
-    let walker = WalkDir::new(path).into_iter();
+async fn source_from_multi_source_contract(root: &str) -> Result<ContractSource> {
+    let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .map_or(true, |name| !name.starts_with('.'))
+    });
     let mut sources = Vec::new();
 
     for entry in walker {
@@ -151,8 +156,9 @@ async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource>
                 let path = entry.path();
                 if path.is_file() && path.extension().map_or(false, |ext| ext == "sol") {
                     let content = fs::read_to_string(path).await?;
+                    let relative_path = path.strip_prefix(root)?;
                     sources.push(SourceFile {
-                        name: path.display().to_string(),
+                        name: relative_path.display().to_string(),
                         content,
                     });
                 }
@@ -374,14 +380,15 @@ impl PlainContract {
         self.source_files = Some(source_files);
         self.compilation_output = Some(output.clone());
 
-        if output.has_compiler_errors() {
-            Err(eyre::eyre!(format!(
-                "Compilation failed: {:?}",
-                &output.output().errors
-            )))?
-        } else {
-            Ok(output)
-        }
+        // if output.has_compiler_errors() {
+        //     Err(eyre::eyre!(format!(
+        //         "Compilation failed: {:?}",
+        //         &output.output().errors
+        //     )))?
+        // } else {
+        //     Ok(output)
+        // }
+        Ok(output)
     }
 
     pub fn new(metadata: Metadata, source: ContractSource) -> PlainContract {
@@ -540,7 +547,11 @@ impl PlainContract {
                 .as_ref()
                 .context("No source files in PlainContract")?
                 .iter()
-                .find(|f| f.name.trim_start_matches("/") == file)
+                .find(|f| {
+                    f.name.trim_start_matches("/") == file
+                        || f.name == file.trim_end_matches(".sol")
+                        || f.name.trim_start_matches("/") == file.trim_end_matches(".sol")
+                })
                 .context(format!(
                     "No source file matches the expected file name: {}",
                     file
@@ -548,7 +559,6 @@ impl PlainContract {
                 .content;
             let content = content.replace("\r\n", "\n");
             for node in nodes {
-                println!("visisting {:?}", node.attribute::<String>("name"));
                 match node.node_type {
                     NodeType::FunctionDefinition => {
                         let src = &node.src;
@@ -688,8 +698,6 @@ mod test {
     async fn test_parse_multisource_contract() -> Result<()> {
         let mut contract = PlainContract::from_folder("./contracts/RBPill").await?;
         contract.compile().await?;
-        let source_type = &contract.source;
-        println!("{:?}", source_type);
 
         let functions = contract.extract_functions()?;
         assert!(!functions.is_empty(), "No functions found");

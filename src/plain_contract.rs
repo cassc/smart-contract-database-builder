@@ -2,13 +2,12 @@ use alloy_json_abi::Function;
 use duckdb::ToSql;
 use eyre::{ContextCompat, Result};
 use foundry_compilers::{
-    artifacts::{Node, NodeType::*, Settings},
+    artifacts::{Node, NodeType, NodeType::*, Settings},
     multi::{MultiCompiler, MultiCompilerSettings},
     solc::{Solc, SolcCompiler},
     Project, ProjectCompileOutput, ProjectPathsConfig,
 };
 
-use foundry_compilers_artifacts::NodeType;
 use itertools::Itertools;
 use semver::Version;
 use serde::{Deserialize, Serialize};

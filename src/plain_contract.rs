@@ -374,7 +374,14 @@ impl PlainContract {
         self.source_files = Some(source_files);
         self.compilation_output = Some(output.clone());
 
-        Ok(output)
+        if output.has_compiler_errors() {
+            Err(eyre::eyre!(format!(
+                "Compilation failed: {:?}",
+                &output.output().errors
+            )))?
+        } else {
+            Ok(output)
+        }
     }
 
     pub fn new(metadata: Metadata, source: ContractSource) -> PlainContract {
@@ -501,7 +508,6 @@ impl PlainContract {
         compilation_output
             .artifacts_with_files()
             .for_each(|(file, contract_name, artifact)| {
-                println!("visiting {:?}", contract_name);
                 if let Some(source_file) = artifact.source_file() {
                     let abi_functions = artifact
                         .abi
@@ -646,7 +652,6 @@ mod test {
 
         assert!(matches!(source, Err(_e)));
 
-        // Note:
         let source = contract.source_code_by_contract_and_function_name("Counter", "count");
 
         assert!(matches!(source, Err(_e)));

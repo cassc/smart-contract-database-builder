@@ -5,6 +5,10 @@ import "./Counter.sol";
 
 contract AdvancedCounter is Counter {
     function reset() public {
-        count = 0;
+        count = privateFunction();
+    }
+
+    function privateFunction () private returns (uint) {
+        return block.timestamp;
     }
 }

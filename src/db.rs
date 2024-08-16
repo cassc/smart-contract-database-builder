@@ -2,11 +2,10 @@ use std::fs::create_dir_all;
 
 use crate::{
     functions::ContractFunction,
-    plain_contract::{ContractSource, ContractSourceType, Metadata, PlainContract},
+    plain_contract::{ContractSource, Metadata, PlainContract},
 };
-use duckdb::{params, types::FromSql, Connection};
+use duckdb::{types::FromSql, Connection};
 use eyre::Result;
-use rand::Rng;
 
 pub struct Storage {
     pub conn: Connection,
@@ -87,6 +86,25 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
 ",
         );
 
+        let _ = conn.execute_batch(
+            r"
+-- Create functions table with foreign key
+CREATE TABLE functions (
+    id STRING PRIMARY KEY,
+    contract_id STRING,
+    contract_name STRING,
+    function_name STRING,
+    filename STRING,
+    signature STRING,
+    selector STRING,
+    source_code STRING,
+    FOREIGN KEY (contract_id) REFERENCES contract(id)
+);
+
+CREATE INDEX idx_functions_composite ON functions(contract_id, function_name);
+",
+        );
+
         Ok(Storage { conn })
     }
 
@@ -114,31 +132,6 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
         let row = match rows.next()? {
             Some(row) => row,
             None => return Ok(None),
-        };
-
-        Ok(Some(row_to_contract(row)?))
-    }
-
-    #[allow(dead_code)]
-    pub fn get_random_contract(
-        &self,
-        source_type: &ContractSourceType,
-        offset: Option<u32>,
-    ) -> Result<Option<PlainContract>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT source, source_type::varchar, metadata FROM contract where source_type::varchar=? OFFSET ? LIMIT 1",
-        )?;
-        let source_type: String = source_type.to_string();
-        let mut rows = stmt.query(params![
-            &source_type,
-            offset.unwrap_or_else(|| {
-                let mut rng = rand::thread_rng();
-                rng.gen_range(0..1000)
-            })
-        ])?;
-        let row = match rows.next()? {
-            Some(row) => row,
-            None => return Err(eyre::eyre!("No contract found")),
         };
 
         Ok(Some(row_to_contract(row)?))
@@ -205,7 +198,7 @@ CREATE INDEX idx_function_composite ON function(contract_id, selector, signature
 
     pub fn store_functions(&self, functions: &[ContractFunction]) -> Result<()> {
         let mut stmt = self.conn.prepare(
-            "INSERT OR IGNORE INTO function (id, contract_id, contract_name, function_name, filename, signature, selector, source_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO functions (id, contract_id, contract_name, function_name, filename, signature, selector, source_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )?;
 
         for f in functions.iter() {

@@ -55,6 +55,9 @@ struct IndexFunctionsArgs {
     /// How many contracts to process in one go
     #[arg(long)]
     chunk_size: usize,
+    /// Optionally ignore errors during processing (default: false)
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+    ignore_errors: bool,
 }
 
 #[derive(Parser)]
@@ -270,6 +273,7 @@ async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Re
 
     let mut i: u64 = 0;
     let size = args.chunk_size as u64;
+    let ignore_errors = args.ignore_errors;
     loop {
         if i >= total_countracts {
             break;
@@ -310,7 +314,9 @@ async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Re
                                 contract.id(),
                                 e
                             );
-                            panic!("Failed to extract functions from contract");
+                            if !ignore_errors {
+                                panic!("Failed to extract functions from contract");
+                            }
                         }
                         Ok(funcs) => {
                             let mut functions = functions.lock().await;
@@ -441,6 +447,7 @@ mod tests {
         let contract_ids = vec![
             "af1d91600db88a681f3988c4d3935166",
             "eebec572cb1ab02cd86c60d169767f84", // has `main` instead of `main.sol`
+            "266e90fe1d6cfad43bfb21a73a7fa8d2",
         ];
 
         for contract_id in contract_ids {

@@ -547,9 +547,10 @@ impl PlainContract {
                 .context("No source files in PlainContract")?
                 .iter()
                 .find(|f| {
-                    f.name.trim_start_matches("/") == file
+                    // better way to handle this?
+                    trim_prefix(&f.name) == file
                         || f.name == file.trim_end_matches(".sol")
-                        || f.name.trim_start_matches("/") == file.trim_end_matches(".sol")
+                        || trim_prefix(&f.name) == file.trim_end_matches(".sol")
                 })
                 .context(format!(
                     "No source file matches the expected file name: {}",
@@ -627,6 +628,10 @@ impl PlainContract {
 
         ContractSource::write_entries(&source_path, &source_files.iter().collect()).await
     }
+}
+
+fn trim_prefix(s: &str) -> &str {
+    s.trim_start_matches(|c| c == '/' || c == '.')
 }
 
 #[cfg(test)]
@@ -709,5 +714,15 @@ mod test {
             println!("{}", "-".repeat(80));
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_trim_string() {
+        let inputs = ["./data.sol", "/data.sol"];
+        let expected = "data.sol";
+
+        for s in inputs {
+            assert_eq!(expected, trim_prefix(s));
+        }
     }
 }

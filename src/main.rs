@@ -55,6 +55,9 @@ struct IndexFunctionsArgs {
     /// How many contracts to process in one go
     #[arg(long)]
     chunk_size: usize,
+    /// Optionally ignore errors during processing (default: false)
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+    ignore_errors: bool,
 }
 
 #[derive(Parser)]
@@ -76,11 +79,11 @@ struct ExportSourceArgs {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Preprocess the contracts with the given options
+    /// Preprocess the contracts with the given options and build a contract database. This will create or modify the contract database.
     PreProcess(PreProcessArgs),
-    /// Compile all contracts and store populate the `function` table
+    /// Compile all contracts and populate the `functions` table. This will modify the contract database.
     IndexFunctions(IndexFunctionsArgs),
-    /// Download all solc binaries
+    /// Download all solc binaries. Run this first before pre-process or index functions.
     DownloadSolc,
     /// Export source code of a contract
     ExportSource(ExportSourceArgs),
@@ -270,6 +273,7 @@ async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Re
 
     let mut i: u64 = 0;
     let size = args.chunk_size as u64;
+    let ignore_errors = args.ignore_errors;
     loop {
         if i >= total_countracts {
             break;
@@ -310,7 +314,9 @@ async fn index_functions(storage: &mut Storage, args: &IndexFunctionsArgs) -> Re
                                 contract.id(),
                                 e
                             );
-                            panic!("Failed to extract functions from contract");
+                            if !ignore_errors {
+                                panic!("Failed to extract functions from contract");
+                            }
                         }
                         Ok(funcs) => {
                             let mut functions = functions.lock().await;
@@ -363,7 +369,8 @@ mod tests {
     use self::db::Storage;
 
     use super::*;
-    use crate::plain_contract::ContractSourceType;
+
+    const TEST_DB_PATH: &str = "test.duckdb";
 
     async fn compile_and_extract_function(contract: &mut PlainContract) -> Result<()> {
         println!("Compiling contract: {}", contract.id());
@@ -379,7 +386,7 @@ mod tests {
 
     async fn compile_standard_json(storage: &mut Storage) -> Result<()> {
         let mut contract = storage
-            .get_random_contract(&ContractSourceType::Json, None)?
+            .get_contract("af1d91600db88a681f3988c4d3935166")?
             .expect("No contract found");
 
         // let mut contract = storage
@@ -391,7 +398,7 @@ mod tests {
 
     async fn compile_single_source_file(storage: &mut Storage) -> Result<()> {
         let mut contract = storage
-            .get_random_contract(&ContractSourceType::SingleSolidity, None)?
+            .get_contract("1e889892cd854c8a85230ff7bd5a2935")?
             .expect("No contract found");
 
         compile_and_extract_function(&mut contract).await
@@ -399,45 +406,65 @@ mod tests {
 
     async fn compile_multi_source_files(storage: &mut Storage) -> Result<()> {
         let mut contract = storage
-            .get_random_contract(&ContractSourceType::MultiSolidity, None)?
+            .get_contract("6ce645920ec037cf121c4ca9313a5a41")?
             .expect("No contract found");
         compile_and_extract_function(&mut contract).await
     }
 
     #[allow(dead_code)]
-    async fn compile_yul_source_code(storage: &mut Storage) -> Result<()> {
-        let mut contract = storage
-            .get_random_contract(&ContractSourceType::MultiSolidity, None)?
-            .expect("No contract found");
-
-        compile_and_extract_function(&mut contract).await
+    async fn compile_yul_source_code(_storage: &mut Storage) -> Result<()> {
+        todo!();
     }
 
     #[tokio::test]
     async fn test_compile_and_extract_functions() -> Result<()> {
-        let duckdb_path = std::env::var("TEST_DUCKDB_PATH").expect("Test db is required");
-        let mut storage = Storage::new(&duckdb_path).unwrap();
+        let mut storage = Storage::new(TEST_DB_PATH).unwrap();
         compile_standard_json(&mut storage).await?;
         compile_single_source_file(&mut storage).await?;
         compile_multi_source_files(&mut storage).await
     }
 
     #[tokio::test]
-    async fn get_source_code_by_function_complex() -> Result<()> {
-        let duckdb_path = std::env::var("TEST_DUCKDB_PATH").expect("Test db is required");
+    async fn test_get_source_code_by_function_complex() -> Result<()> {
         let contract_id = "1e889892cd854c8a85230ff7bd5a2935";
-        let storage = Storage::new(&duckdb_path)?;
+        let storage = Storage::new(TEST_DB_PATH)?;
         let mut contract = storage
             .get_contract(contract_id)?
             .expect("Contract not found");
         contract.compile().await?;
 
-        let source = contract.source_code_by_contract_and_function_name(
+        let _source = contract.source_code_by_contract_and_function_name(
             "TransparentUpgradeableProxy",
             "upgradeTo",
         )?;
 
-        println!("{source}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_extract_source() -> Result<()> {
+        let storage = Storage::new(TEST_DB_PATH)?;
+        let contract_ids = vec![
+            "af1d91600db88a681f3988c4d3935166",
+            "eebec572cb1ab02cd86c60d169767f84", // has `main` instead of `main.sol`
+            "266e90fe1d6cfad43bfb21a73a7fa8d2",
+        ];
+
+        for contract_id in contract_ids {
+            println!("Processing contract: {}", contract_id);
+            let mut contract = storage
+                .get_contract(contract_id)?
+                .expect("Contract not found");
+            contract.compile().await?;
+
+            let functions = contract.extract_functions()?;
+
+            assert!(
+                !functions.is_empty(),
+                "No functions found for contract {}",
+                contract_id
+            );
+        }
 
         Ok(())
     }

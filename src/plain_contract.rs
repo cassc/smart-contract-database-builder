@@ -1,7 +1,8 @@
+use alloy_json_abi::Function;
 use duckdb::ToSql;
 use eyre::{ContextCompat, Result};
 use foundry_compilers::{
-    artifacts::{Node, NodeType::*, Settings},
+    artifacts::{Node, NodeType, NodeType::*, Settings},
     multi::{MultiCompiler, MultiCompilerSettings},
     solc::{Solc, SolcCompiler},
     Project, ProjectCompileOutput, ProjectPathsConfig,
@@ -16,7 +17,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use tokio::fs::{self, create_dir_all};
-use tokio_stream::{wrappers::ReadDirStream, StreamExt};
+use walkdir::WalkDir;
 
 use crate::{functions::ContractFunction, utils::simple_hash};
 
@@ -139,20 +140,25 @@ pub struct PlainContract {
     pub source_files: Option<Vec<SourceFile>>,
 }
 
-async fn source_from_multi_source_contract(path: &str) -> Result<ContractSource> {
-    // list all solidity files in the folder
-    let folder = fs::read_dir(path).await?;
-    let mut entries = ReadDirStream::new(folder);
-
+async fn source_from_multi_source_contract(root: &str) -> Result<ContractSource> {
+    let walker = WalkDir::new(root).into_iter().filter_entry(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .map_or(true, |name| !name.starts_with('.'))
+    });
     let mut sources = Vec::new();
-    while let Some(entry) = entries.next().await {
+
+    for entry in walker {
         match entry {
             Ok(entry) => {
                 let path = entry.path();
-                if path.extension().map_or(false, |ext| ext == "sol") {
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "sol") {
+                    let content = fs::read_to_string(path).await?;
+                    let relative_path = path.strip_prefix(root)?;
                     sources.push(SourceFile {
-                        name: entry.file_name().to_string_lossy().into_owned(),
-                        content: fs::read_to_string(path).await?,
+                        name: relative_path.display().to_string(),
+                        content,
                     });
                 }
             }
@@ -373,6 +379,14 @@ impl PlainContract {
         self.source_files = Some(source_files);
         self.compilation_output = Some(output.clone());
 
+        // if output.has_compiler_errors() {
+        //     Err(eyre::eyre!(format!(
+        //         "Compilation failed: {:?}",
+        //         &output.output().errors
+        //     )))?
+        // } else {
+        //     Ok(output)
+        // }
         Ok(output)
     }
 
@@ -480,48 +494,120 @@ impl PlainContract {
         Err(eyre::eyre!("Function not found"))
     }
 
-    /// Return a list of functions from the contract ABI.
+    /// Return a list of functions from the contract AST. Ignoring any interface fucntions, ie. functions without a body
     pub fn extract_functions(&self) -> Result<Vec<ContractFunction>> {
         let compilation_output = self
             .compilation_output
             .as_ref()
             .context("No compilation output")?;
         let contract_id = self.id();
-        let functions = compilation_output
-            .artifacts()
-            .map(|(contract_name, contract)| {
-                let filename = contract
-                    .source_file()
-                    .and_then(|f| f.ast)
-                    .map(|ast| ast.absolute_path)
-                    .unwrap_or("".into());
+        let mut functions = vec![];
+        struct NodesToVisit {
+            nodes: Vec<Node>,
+            contract_id: String,
+            file: String,
+            contract_name: String,
+            abi_functions: Vec<Function>,
+        }
+        let mut nodes_to_visit = vec![];
 
-                if let Some(ref abi) = contract.abi {
-                    abi.functions()
-                        .map(|f| {
-                            let function_name = &f.name;
-                            let source_code = self
-                                .source_code_by_contract_and_function_name(
-                                    &contract_name,
-                                    function_name,
-                                )
-                                .unwrap_or("".into());
-
-                            ContractFunction::from_abi(
-                                contract_id.clone(),
-                                filename.clone(),
-                                contract_name.clone(),
-                                f,
-                                source_code,
-                            )
-                        })
-                        .collect()
-                } else {
-                    vec![]
+        compilation_output
+            .artifacts_with_files()
+            .for_each(|(file, contract_name, artifact)| {
+                if let Some(source_file) = artifact.source_file() {
+                    let abi_functions = artifact
+                        .abi
+                        .as_ref()
+                        .map(|abi| abi.functions().cloned())
+                        .unwrap_or_default()
+                        .collect::<Vec<_>>();
+                    if let Some(ast) = source_file.ast {
+                        nodes_to_visit.push(NodesToVisit {
+                            nodes: ast.nodes,
+                            contract_id: contract_id.clone(),
+                            file: file.display().to_string(),
+                            contract_name: contract_name.clone(),
+                            abi_functions,
+                        });
+                    }
                 }
             });
 
-        Ok(functions.flatten().collect())
+        while nodes_to_visit.len() > 1 {
+            let NodesToVisit {
+                nodes,
+                contract_id,
+                file,
+                contract_name,
+                abi_functions,
+            } = nodes_to_visit.pop().context("No node")?;
+            let content = &self
+                .source_files
+                .as_ref()
+                .context("No source files in PlainContract")?
+                .iter()
+                .find(|f| {
+                    // better way to handle this?
+                    trim_prefix(&f.name) == file
+                        || f.name == file.trim_end_matches(".sol")
+                        || trim_prefix(&f.name) == file.trim_end_matches(".sol")
+                })
+                .context(format!(
+                    "No source file matches the expected file name: {}",
+                    file
+                ))?
+                .content;
+            let content = content.replace("\r\n", "\n");
+            for node in nodes {
+                match node.node_type {
+                    NodeType::FunctionDefinition => {
+                        let src = &node.src;
+                        let start = src.start;
+                        let length = src.length.expect("No length in source location");
+                        let bytes = &content.as_bytes();
+                        let source_code = &bytes[start..start + length];
+                        let source_code = String::from_utf8_lossy(source_code);
+
+                        // ignore interface functions
+                        if source_code.trim_end().ends_with(';') {
+                            continue;
+                        }
+
+                        let function_name = node.attribute::<String>("name").unwrap_or_default();
+
+                        // TODO: it's possible to match the function with the abi and get the correct function selector
+                        // let abi_func = abi_functions.iter().find(|f| f.signature == function_name);
+
+                        let f = ContractFunction {
+                            id: simple_hash(&format!(
+                                "{}{}{}",
+                                contract_id, function_name, source_code
+                            )),
+                            contract_id: contract_id.clone(),
+                            contract_name: contract_name.clone(),
+                            function_name,
+                            source_code: source_code.into(),
+                            filename: file.clone(),
+                            selector: "".into(),
+                            signature: "".into(),
+                        };
+                        functions.push(f);
+                    }
+                    _ => {
+                        let children = node.nodes;
+                        nodes_to_visit.push(NodesToVisit {
+                            nodes: children,
+                            contract_id: contract_id.clone(),
+                            file: file.clone(),
+                            contract_name: contract_name.clone(),
+                            abi_functions: abi_functions.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(functions)
     }
 
     /// Export source code to the output folder
@@ -529,10 +615,23 @@ impl PlainContract {
         let root_path = PathBuf::from(output_folder);
         let source_path = root_path.join(&self.metadata.contract_name);
 
+        let metadata = &self.metadata;
+        let metadata_source = SourceFile {
+            name: "metadata.json".into(),
+            content: serde_json::to_string_pretty(metadata)?,
+        };
+        let to_write = vec![&metadata_source];
+
+        ContractSource::write_entries(&source_path, &to_write).await?;
+
         let source_files = self.get_source_files()?;
 
         ContractSource::write_entries(&source_path, &source_files.iter().collect()).await
     }
+}
+
+fn trim_prefix(s: &str) -> &str {
+    s.trim_start_matches(|c| c == '/' || c == '.')
 }
 
 #[cfg(test)]
@@ -540,7 +639,7 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn compile_and_get_source_by_function() -> Result<()> {
+    async fn test_compile_and_get_source_by_function() -> Result<()> {
         let mut contract = PlainContract::from_folder("./contracts/demo").await?;
 
         let output = contract.compile().await?;
@@ -556,7 +655,7 @@ mod test {
             .ast;
 
         let source = contract.source_code_by_contract_and_function_name("Counter", "decrement");
-        println!("{:?}", source);
+
         let expected_found =
             "function decrement() public override {\n        count = count.subtract(1);\n    }";
 
@@ -567,23 +666,63 @@ mod test {
 
         assert!(matches!(source, Err(_e)));
 
-        // Note:
         let source = contract.source_code_by_contract_and_function_name("Counter", "count");
 
         assert!(matches!(source, Err(_e)));
 
+        let source = contract
+            .source_code_by_contract_and_function_name("AdvancedCounter", "privateFunction");
+
+        let expected_found = "function privateFunction () private returns (uint) {\n        return block.timestamp;\n    }";
+
+        assert!(matches!(source, Ok(found) if found == expected_found));
         Ok(())
     }
 
     #[tokio::test]
-    async fn parse_etherscan_contract() -> Result<()> {
+    async fn test_parse_etherscan_contract() -> Result<()> {
         let mut contract = PlainContract::from_etherscan_json(
             "./contracts/0x9ca84eacf0d0775782ab5b34d01187b37f1ceea4_Bueno721Drop.json",
         )
         .await?;
         contract.compile().await?;
         let functions = contract.extract_functions()?;
-        println!("{:?}", functions);
+        for f in functions {
+            println!("{}", f.filename);
+            println!("{}", f.contract_name);
+            println!("{}", f.contract_id);
+            println!("{}", f.function_name);
+            println!("{}", f.source_code);
+            println!("{}", "-".repeat(80));
+        }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_parse_multisource_contract() -> Result<()> {
+        let mut contract = PlainContract::from_folder("./contracts/RBPill").await?;
+        contract.compile().await?;
+
+        let functions = contract.extract_functions()?;
+        assert!(!functions.is_empty(), "No functions found");
+        for f in functions {
+            println!("{}", f.filename);
+            println!("{}", f.contract_name);
+            println!("{}", f.contract_id);
+            println!("{}", f.function_name);
+            println!("{}", f.source_code);
+            println!("{}", "-".repeat(80));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_trim_string() {
+        let inputs = ["./data.sol", "/data.sol"];
+        let expected = "data.sol";
+
+        for s in inputs {
+            assert_eq!(expected, trim_prefix(s));
+        }
     }
 }

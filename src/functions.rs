@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContractFunction {
-    pub id: String,
+    pub id: String, // a unique identifier for the function among all functions in all contracts
     /// The contract id. A compilation output can have multiple contracts, in this
     /// case there could be multiple `contract_name`s associated with the same
     /// `contract_id`.
